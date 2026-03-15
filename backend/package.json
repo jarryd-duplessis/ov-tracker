@@ -1,0 +1,20 @@
+{
+  "name": "komt-ie-backend",
+  "version": "1.0.0",
+  "description": "Komt ie? - Live Dutch OV tracker backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "gtfs-realtime-bindings": "^1.1.1",
+    "node-fetch": "^2.7.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}
