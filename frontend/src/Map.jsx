@@ -9,12 +9,14 @@ const TRANSPORT_COLOURS = {
 
 const CATEGORY_ICON = { BUS: '🚌', TRAM: '🚊', RAIL: '🚆', SUBWAY: '🚇', FERRY: '⛴️' };
 
-export default function Map({ userLocation, nearbyStops, departures, onLocationSelect }) {
+export default function Map({ userLocation, nearbyStops, departures, onMapMove }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
   const userMarkerRef = useRef(null);
   const vehicleMarkersRef = useRef([]);
+  const hasCenteredRef = useRef(false);
+  const moveTimerRef = useRef(null);
   const [vehicleCount, setVehicleCount] = useState(0);
 
   // Initialise map
@@ -31,28 +33,37 @@ export default function Map({ userLocation, nearbyStops, departures, onLocationS
 
     mapRef.current.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-    mapRef.current.getCanvas().style.cursor = 'crosshair';
-    mapRef.current.on('click', (e) => {
-      if (onLocationSelect) {
-        onLocationSelect({ lat: e.lngLat.lat, lon: e.lngLat.lng });
-      }
+    // Fetch stops for whatever area the user pans to (debounced 600ms, zoom >= 13)
+    mapRef.current.on('moveend', () => {
+      clearTimeout(moveTimerRef.current);
+      moveTimerRef.current = setTimeout(() => {
+        const map = mapRef.current;
+        if (!map || !onMapMove) return;
+        if (map.getZoom() < 13) return;
+        const c = map.getCenter();
+        onMapMove({ lat: c.lat, lon: c.lng });
+      }, 600);
     });
 
     return () => {
+      clearTimeout(moveTimerRef.current);
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [onLocationSelect]);
+  }, [onMapMove]);
 
-  // Pan to user location
+  // Centre on user location only on the first fix — never again (avoids snapping on GPS updates)
   useEffect(() => {
     if (!userLocation || !mapRef.current) return;
 
-    mapRef.current.flyTo({
-      center: [userLocation.lon, userLocation.lat],
-      zoom: 15,
-      speed: 1.2
-    });
+    if (!hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      mapRef.current.flyTo({
+        center: [userLocation.lon, userLocation.lat],
+        zoom: 15,
+        speed: 1.2
+      });
+    }
 
     // Add / update user location marker
     if (userMarkerRef.current) {
@@ -171,7 +182,7 @@ export default function Map({ userLocation, nearbyStops, departures, onLocationS
           pointerEvents: 'none', whiteSpace: 'nowrap',
           border: '1px solid #333'
         }}>
-          📍 Click map to set your location
+          📍 Pan the map to explore stops
         </div>
       )}
       {vehicleCount > 0 && (

@@ -182,10 +182,7 @@ export default function App() {
             userLocation={userLocation}
             nearbyStops={nearbyStops}
             departures={departures}
-            onLocationSelect={({ lat, lon }) => {
-              setUserLocation({ lat, lon });
-              fetchNearbyStops(lat, lon);
-            }}
+            onMapMove={({ lat, lon }) => fetchNearbyStops(lat, lon)}
           />
         </div>
 
