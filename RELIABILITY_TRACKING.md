@@ -309,7 +309,70 @@ Stops with `live_ratio < 0.2` over the last 7 days are "dead zones".
 
 **Alternative source:** The 9292 Reisberichten API provides planned/unplanned disruptions filterable by area, operator, and line — but requires a commercial license from 9292.
 
-### 4.9 "No Live Tracking" Notice
+### 4.9 Schiphol Flight Integration
+
+**Concept:** When a user plans a journey to Schiphol Airport, prompt them for their flight number. Look up the flight's departure time and work backwards to suggest the optimal transit route and departure time.
+
+**User flow:**
+1. User searches for a journey to Schiphol (detected by destination stop codes in the Schiphol area, e.g. `stopArea:sp`)
+2. App prompts: "Flying from Schiphol? Enter your flight number for a personalised travel plan"
+3. User enters flight number (e.g. `KL1234`)
+4. Backend looks up flight departure time
+5. App calculates: gate closing time → recommended airport arrival → transit travel time → when to leave
+6. Shows suggested departure with buffer, and flags if the recommended line/route has reliability issues
+
+**Timeline calculation:**
+```
+gateCloseTime    = flightDepartureTime - 45 minutes (Schengen) or - 60 minutes (non-Schengen)
+arriveAirportBy  = gateCloseTime - 60 minutes (security + buffer)
+latestDeparture  = arriveAirportBy - transitTravelTime
+suggestedLeaveAt = latestDeparture - walkToStopMinutes - bufferMinutes(5)
+```
+
+**Display:**
+- Flight card at top of journey results: "KL1234 to London · Departs 14:30 · Gate closes 13:45"
+- Suggested transit: "Take the 12:15 Intercity from Utrecht CS → arrive Schiphol 12:47"
+- Reliability warning if applicable: "This train is on time 68% of mornings — consider the 11:45 for safety"
+- Countdown: "Leave in 45 minutes"
+
+**Flight data API options:**
+
+| API | Cost | Coverage | Notes |
+|-----|------|----------|-------|
+| [Schiphol Developer API](https://developer.schiphol.nl/) | Free (500 req/day) | Schiphol only | Official, best option. Provides flight times, gate, terminal, status |
+| AviationStack | Free tier (100 req/month) | Global | Very limited free tier |
+| FlightAware AeroAPI | Paid ($0.01/call) | Global | Overkill for this use case |
+| OpenSky Network | Free | Live tracking only | No scheduled flight data |
+
+**Recommended: Schiphol Developer API** — it's free, official, Schiphol-specific, and provides exactly what we need: scheduled departure time, terminal, gate, and real-time status (delayed/cancelled).
+
+**Backend endpoint:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/flight/:flightNumber` | Look up flight details from Schiphol API (`{ departureTime, gate, terminal, destination, status }`) |
+
+**Schiphol API response fields of interest:**
+- `scheduleDateTime` — scheduled departure
+- `estimatedLandingTime` / `actualOffBlockTime` — real-time updates
+- `flightDirection` — D (departure) or A (arrival)
+- `terminal` / `gate` — helps determine walking time inside airport
+- `publicFlightState` — scheduled, delayed, cancelled, departed
+- `route.destinations` — for Schengen vs non-Schengen buffer logic
+
+**Integration with existing features:**
+- Combines with **Journey Planner** (4.3 commute memory: save "To Schiphol" as a commute)
+- Combines with **Leave Now notification** (4.4: trigger based on flight-derived leave time)
+- Combines with **Reliability Score** (4.2: warn about unreliable connections)
+- Combines with **Weather** (4.5: heavy rain/storm may affect airport operations)
+
+**Edge cases:**
+- Flight delayed → update suggested departure in real-time ("Your flight is delayed to 15:30 — you can take the 13:15 instead")
+- Flight cancelled → notify user immediately
+- Multiple flights with same number (codeshares) → show operator and let user confirm
+- User arriving at Schiphol (inbound) → offer onward transit suggestions from Schiphol to destination
+
+### 4.10 "No Live Tracking" Notice
 
 **Logic:**
 - Per departure: already shown via LIVE/SCHEDULED badge
@@ -330,6 +393,7 @@ Stops with `live_ratio < 0.2` over the last 7 days are "dead zones".
 | `GET` | `/api/deadzones` | Stops with consistently poor live tracking coverage |
 | `GET` | `/api/deadzones/nearby` | Dead zones near coordinates (`?lat=&lon=&radius=`) |
 | `GET` | `/api/weather` | Current weather for coordinates (`?lat=&lon=`) — proxied from Open-Meteo |
+| `GET` | `/api/flight/:flightNumber` | Schiphol flight lookup — departure time, gate, terminal, status |
 
 ### Enhanced WebSocket Message
 
@@ -384,6 +448,7 @@ The departure objects sent over WebSocket will be enriched:
 | Open-Meteo | Weather data for Netherlands | Free, no API key |
 | 9292 Reisberichten API | Planned/unplanned disruptions | Commercial license required |
 | NDOV Loket | Raw KV6/KV15/KV17 data streams | Free, requires registration |
+| Schiphol Developer API (`developer.schiphol.nl`) | Flight times, gate, terminal, status | Free (500 req/day) |
 
 ### BISON/NDOV Data Standards (Reference)
 
@@ -418,6 +483,8 @@ OVapi ──▶ parse 20+ fields ──┬──▶ Reliability aggregator ─�
 
 Open-Meteo ──▶ Weather proxy ──▶ Frontend
 
+Schiphol API ──▶ Flight lookup ──▶ Journey planner (optimal departure + reliability warnings)
+
 localStorage ──▶ Saved commutes, "leave now" settings
 ```
 
@@ -434,3 +501,4 @@ localStorage ──▶ Saved commutes, "leave now" settings
 9. **Personalised commute memory** — client-side only
 10. **"Leave now" notification** — Service Worker integration
 11. **Weather-aware suggestions** — Open-Meteo integration
+12. **Schiphol flight integration** — Schiphol Developer API, journey planner enhancement
