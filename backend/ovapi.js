@@ -31,6 +31,24 @@ async function getStopArea(stopAreaCode) {
   return res.json();
 }
 
+// OVapi returns times as 'YYYY-MM-DDTHH:MM:SS' in Dutch local time (no timezone suffix).
+// The server runs UTC, so we must append the Amsterdam offset before parsing.
+function parseAmsterdamTime(timeStr) {
+  if (!timeStr) return null;
+  // Already has timezone info — parse as-is
+  if (/Z|[+-]\d{2}:\d{2}$/.test(timeStr)) return new Date(timeStr);
+  // Determine CET (+01:00) vs CEST (+02:00): DST starts last Sunday of March,
+  // ends last Sunday of October (Europe/Amsterdam rules).
+  const approx = new Date(timeStr + 'Z'); // rough UTC stand-in just to get the year
+  const yr = approx.getUTCFullYear();
+  const lastSunMar = new Date(Date.UTC(yr, 2, 31));
+  lastSunMar.setUTCDate(31 - lastSunMar.getUTCDay());
+  const lastSunOct = new Date(Date.UTC(yr, 9, 31));
+  lastSunOct.setUTCDate(31 - lastSunOct.getUTCDay());
+  const offset = (approx >= lastSunMar && approx < lastSunOct) ? '+02:00' : '+01:00';
+  return new Date(timeStr + offset);
+}
+
 // Parse OVapi passtime into a clean departure object
 function parsePasstime(passtime, stopCode) {
   const {
@@ -45,11 +63,14 @@ function parsePasstime(passtime, stopCode) {
   } = passtime;
 
   const expectedTime = ExpectedArrivalTime || TargetArrivalTime;
+  if (!expectedTime) return null;
+
   const isRealtime = !!RealtimeArrival;
 
   // Calculate minutes until arrival
   const now = new Date();
-  const arrival = new Date(expectedTime);
+  const arrival = parseAmsterdamTime(expectedTime);
+  if (!arrival || isNaN(arrival.getTime())) return null;
   const minutesUntil = Math.round((arrival - now) / 60000);
 
   return {
@@ -81,7 +102,7 @@ function parseTpcResponse(data, stopCode) {
       try {
         const dep = parsePasstime(passtime, tpc);
         // Only show upcoming departures (not more than 2 mins in the past)
-        if (dep.minutesUntil >= -2) {
+        if (dep && dep.minutesUntil >= -2) {
           departures.push(dep);
         }
       } catch (e) {

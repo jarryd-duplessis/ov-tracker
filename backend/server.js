@@ -46,7 +46,7 @@ api.get('/stops/nearby', async (req, res) => {
   if (!lat || !lon) return res.status(400).json({ error: 'lat and lon are required' });
 
   try {
-    const stops = await findNearbyStops(parseFloat(lat), parseFloat(lon), 10, parseFloat(radius));
+    const stops = await findNearbyStops(parseFloat(lat), parseFloat(lon), 30, parseFloat(radius) || 1.0);
     res.json({ stops });
   } catch (e) {
     console.error('Error finding nearby stops:', e);
@@ -88,7 +88,7 @@ async function geocodeLocation(query) {
   const res = await fetch(url, { headers: { 'User-Agent': 'KomtIe/1.0 (live-ov-tracker)' } });
   if (!res.ok) throw new Error(`Geocoding failed: ${res.status}`);
   const data = await res.json();
-  if (!data.length) throw new Error(`Location not found: "${query}"`);
+  if (!Array.isArray(data) || data.length === 0) throw new Error(`Location not found: "${query}"`);
   return {
     lat: parseFloat(data[0].lat),
     lon: parseFloat(data[0].lon),
@@ -197,7 +197,7 @@ wss.on('connection', (ws) => {
 
       if (msg.type === 'subscribe' && Array.isArray(msg.stopCodes)) {
         unsubscribe(ws); // leave previous group if re-subscribing
-        subscribe(ws, msg.stopCodes.slice(0, 10));
+        subscribe(ws, msg.stopCodes.slice(0, 20));
       }
 
       if (msg.type === 'unsubscribe') {

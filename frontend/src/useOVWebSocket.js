@@ -9,6 +9,7 @@ export function useOVWebSocket() {
   const [lastUpdate, setLastUpdate] = useState(null);
   const [error, setError] = useState(null);
   const reconnectTimer = useRef(null);
+  const subscribeTimer = useRef(null);
   const currentStops = useRef([]);
 
   const connect = useCallback(() => {
@@ -19,9 +20,9 @@ export function useOVWebSocket() {
     ws.current.onopen = () => {
       setConnected(true);
       setError(null);
-      // Re-subscribe if we had stops
+      // Re-subscribe immediately on reconnect (no debounce needed — this is a fresh connection)
       if (currentStops.current.length > 0) {
-        subscribe(currentStops.current);
+        ws.current.send(JSON.stringify({ type: 'subscribe', stopCodes: currentStops.current }));
       }
     };
 
@@ -53,15 +54,21 @@ export function useOVWebSocket() {
 
   const subscribe = useCallback((stopCodes) => {
     currentStops.current = stopCodes;
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({ type: 'subscribe', stopCodes }));
-    }
+    // Debounce: GPS updates and map moves fire rapidly. Collapse multiple
+    // subscribe calls within 800ms into one to avoid thrashing poll groups.
+    clearTimeout(subscribeTimer.current);
+    subscribeTimer.current = setTimeout(() => {
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify({ type: 'subscribe', stopCodes: currentStops.current }));
+      }
+    }, 800);
   }, []);
 
   useEffect(() => {
     connect();
     return () => {
       clearTimeout(reconnectTimer.current);
+      clearTimeout(subscribeTimer.current);
       ws.current?.close();
     };
   }, [connect]);

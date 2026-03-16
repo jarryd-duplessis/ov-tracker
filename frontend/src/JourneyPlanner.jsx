@@ -205,7 +205,7 @@ export default function JourneyPlanner() {
               </div>
             )}
             {result.itineraries.map((it, i) => (
-              <ItineraryCard key={i} it={it} index={i} />
+              <ItineraryCard key={`${it.startTime}-${it.endTime}`} it={it} index={i} />
             ))}
           </>
         )}
