@@ -1,0 +1,10 @@
+{
+  "name": "komt-ie-lambda",
+  "version": "1.0.0",
+  "description": "Serverless Lambda functions for Komt ie?",
+  "main": "index.js",
+  "dependencies": {
+    "gtfs-realtime-bindings": "^1.1.0",
+    "jszip": "^3.10.1"
+  }
+}

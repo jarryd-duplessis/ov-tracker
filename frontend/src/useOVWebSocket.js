@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+// In development the Vite proxy handles /ws → localhost:3001.
+// In production set VITE_WS_URL=wss://ws.ov.jarryd.co.za at build time.
+const WS_URL = import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
 export function useOVWebSocket() {
   const ws = useRef(null);
