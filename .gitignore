@@ -3,3 +3,12 @@ stops_cache.json
 routes.txt
 *.pb
 .env
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
+
+# Frontend build output
+frontend/dist/

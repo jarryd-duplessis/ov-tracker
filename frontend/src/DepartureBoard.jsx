@@ -38,22 +38,28 @@ function ConfidenceBadge({ confidence }) {
   );
 }
 
-function DepartureRow({ dep }) {
+function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
   const isNow = dep.minutesUntil <= 1;
   const isSoon = dep.minutesUntil <= 5;
   const colour = TYPE_COLOUR[dep.transportType] || '#888';
   const icon = TYPE_ICON[dep.transportType] || '🚌';
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      padding: '12px 16px',
-      borderBottom: '1px solid #1e2130',
-      opacity: dep.minutesUntil < -1 ? 0.4 : 1,
-      transition: 'opacity 0.3s'
-    }}>
+    <div
+      onClick={() => onTrack(isTracked ? null : dep)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '12px 16px',
+        borderBottom: '1px solid #1e2130',
+        borderLeft: isTracked ? '3px solid #4FC3F7' : '3px solid transparent',
+        background: isTracked ? 'rgba(79,195,247,0.05)' : 'transparent',
+        opacity: dep.minutesUntil < -1 ? 0.4 : 1,
+        transition: 'opacity 0.3s, background 0.2s',
+        cursor: 'pointer',
+      }}
+    >
       {/* Line number badge */}
       <div style={{
         minWidth: 44,
@@ -89,10 +95,7 @@ function DepartureRow({ dep }) {
       </div>
 
       {/* Time */}
-      <div style={{
-        textAlign: 'right',
-        flexShrink: 0
-      }}>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
         <div style={{
           fontSize: 22,
           fontWeight: 800,
@@ -107,11 +110,25 @@ function DepartureRow({ dep }) {
           })}
         </div>
       </div>
+
+      {/* Save button */}
+      <button
+        onClick={e => { e.stopPropagation(); onToggleSave(dep); }}
+        title={isSaved ? 'Remove from saved' : 'Save trip'}
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          fontSize: 18, padding: '0 2px', flexShrink: 0,
+          color: isSaved ? '#FFD700' : '#333',
+          lineHeight: 1,
+        }}
+      >
+        {isSaved ? '★' : '☆'}
+      </button>
     </div>
   );
 }
 
-export default function DepartureBoard({ departures, nearbyStops, lastUpdate, loading }) {
+export default function DepartureBoard({ departures, nearbyStops, lastUpdate, loading, connected, trackedId, savedIds, onTrack, onToggleSave }) {
   const [filter, setFilter] = useState('ALL');
 
   const filtered = departures.filter(d => {
@@ -204,6 +221,20 @@ export default function DepartureBoard({ departures, nearbyStops, lastUpdate, lo
         </div>
       )}
 
+      {/* Stale data banner during reconnect */}
+      {!connected && departures.length > 0 && (
+        <div style={{
+          padding: '6px 16px',
+          background: 'rgba(255,82,82,0.1)',
+          borderBottom: '1px solid rgba(255,82,82,0.2)',
+          fontSize: 11,
+          color: '#FF5252',
+          textAlign: 'center'
+        }}>
+          Reconnecting — data may be stale
+        </div>
+      )}
+
       {/* Departure list */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {filtered.length === 0 && !loading && (
@@ -218,9 +249,19 @@ export default function DepartureBoard({ departures, nearbyStops, lastUpdate, lo
               : '😔 No departures found in the next hour'}
           </div>
         )}
-        {filtered.map((dep, i) => (
-          <DepartureRow key={`${dep.line}-${dep.journeyNumber}-${i}`} dep={dep} />
-        ))}
+        {filtered.map(dep => {
+          const id = `${dep.stopCode}-${dep.journeyNumber}`;
+          return (
+            <DepartureRow
+              key={id}
+              dep={dep}
+              isTracked={trackedId === id}
+              isSaved={savedIds?.has(id)}
+              onTrack={onTrack}
+              onToggleSave={onToggleSave}
+            />
+          );
+        })}
       </div>
 
       {/* Confidence legend */}
