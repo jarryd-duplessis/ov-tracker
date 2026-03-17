@@ -10,6 +10,8 @@ async function getDeparturesMulti(timingPointCodes) {
   const joined = timingPointCodes.join(',');
   const url = `${OVAPI_BASE}/tpc/${joined}`;
   const res = await fetch(url, { headers: HEADERS });
+  // 404 means OVapi doesn't know any of these TPC codes (e.g. openov-nl stop IDs) — treat as no data
+  if (res.status === 404) return {};
   if (!res.ok) throw new Error(`OVapi error: ${res.status}`);
   return res.json();
 }
@@ -61,7 +63,7 @@ function parseTpcResponse(data) {
       try {
         const dep = parsePasstime(passtime, tpc);
         if (dep && dep.minutesUntil >= -2) departures.push(dep);
-      } catch {}
+      } catch (e) { console.warn('[ovapi] Failed to parse passtime:', e.message); }
     }
   }
   return departures.sort((a, b) => a.minutesUntil - b.minutesUntil);

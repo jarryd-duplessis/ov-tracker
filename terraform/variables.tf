@@ -47,7 +47,7 @@ variable "poll_lambda_timeout" {
 }
 
 variable "refresh_stops_timeout" {
-  description = "Timeout (seconds) for the stops refresh Lambda (downloads 37MB GTFS zip)"
+  description = "Timeout (seconds) for the stops refresh Lambda (downloads KV7 + openov-nl GTFS zips)"
   type        = number
-  default     = 300
+  default     = 900
 }

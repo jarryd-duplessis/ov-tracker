@@ -108,10 +108,10 @@ resource "aws_apigatewayv2_stage" "http" {
 # Helper to create HTTP integrations + routes + permissions
 locals {
   http_routes = {
-    stops      = { function = aws_lambda_function.http_stops,      path = "GET /stops/nearby"  }
-    departures = { function = aws_lambda_function.http_departures, path = "GET /departures"     }
-    vehicles   = { function = aws_lambda_function.http_vehicles,   path = "GET /vehicles"       }
-    journey    = { function = aws_lambda_function.http_journey,    path = "GET /journey"        }
+    stops      = { function = aws_lambda_function.http_stops,      path = "GET /api/stops/nearby"  }
+    departures = { function = aws_lambda_function.http_departures, path = "GET /api/departures"     }
+    vehicles   = { function = aws_lambda_function.http_vehicles,   path = "GET /api/vehicles"       }
+    journey    = { function = aws_lambda_function.http_journey,    path = "GET /api/journey"        }
   }
 }
 
@@ -124,7 +124,7 @@ resource "aws_apigatewayv2_integration" "http_stops" {
 
 resource "aws_apigatewayv2_route" "http_stops" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "GET /stops/nearby"
+  route_key = "GET /api/stops/nearby"
   target    = "integrations/${aws_apigatewayv2_integration.http_stops.id}"
 }
 
@@ -145,7 +145,7 @@ resource "aws_apigatewayv2_integration" "http_departures" {
 
 resource "aws_apigatewayv2_route" "http_departures" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "GET /departures"
+  route_key = "GET /api/departures"
   target    = "integrations/${aws_apigatewayv2_integration.http_departures.id}"
 }
 
@@ -166,7 +166,7 @@ resource "aws_apigatewayv2_integration" "http_vehicles" {
 
 resource "aws_apigatewayv2_route" "http_vehicles" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "GET /vehicles"
+  route_key = "GET /api/vehicles"
   target    = "integrations/${aws_apigatewayv2_integration.http_vehicles.id}"
 }
 
@@ -187,7 +187,7 @@ resource "aws_apigatewayv2_integration" "http_journey" {
 
 resource "aws_apigatewayv2_route" "http_journey" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "GET /journey"
+  route_key = "GET /api/journey"
   target    = "integrations/${aws_apigatewayv2_integration.http_journey.id}"
 }
 
@@ -195,6 +195,29 @@ resource "aws_lambda_permission" "http_journey" {
   statement_id  = "AllowHTTPAPIJourney"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.http_journey.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+# ─── Trip route ──────────────────────────────────────────────────────────────
+
+resource "aws_apigatewayv2_integration" "http_trip" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.http_trip.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "http_trip" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "GET /api/trip"
+  target    = "integrations/${aws_apigatewayv2_integration.http_trip.id}"
+}
+
+resource "aws_lambda_permission" "http_trip" {
+  statement_id  = "AllowHTTPAPITrip"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.http_trip.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }

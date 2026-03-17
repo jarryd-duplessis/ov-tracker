@@ -2,6 +2,7 @@
   "name": "komt-ie-frontend",
   "version": "1.0.0",
   "description": "Komt ie? - Live Dutch OV tracker",
+  "type": "module",
   "scripts": {
     "start": "vite",
     "build": "vite build",

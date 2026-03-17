@@ -1,9 +1,11 @@
 'use strict';
 
 // GET /stops/nearby?lat=...&lon=...&radius=...
-// Returns up to 30 nearby stops within the given radius (default 1.5km).
+// Returns all nearby stops within the given radius (default 1.5km), deduplicated at 10m.
 
 const { findNearbyStops } = require('./lib/stops');
+
+if (!process.env.STOPS_BUCKET) console.warn('[http_stops] STOPS_BUCKET env var is not set');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -17,8 +19,15 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'lat and lon are required' }) };
   }
 
+  const parsedLat = parseFloat(lat);
+  const parsedLon = parseFloat(lon);
+  if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLon) ||
+      parsedLat < -90 || parsedLat > 90 || parsedLon < -180 || parsedLon > 180) {
+    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Invalid lat/lon values' }) };
+  }
+
   try {
-    const stops = await findNearbyStops(parseFloat(lat), parseFloat(lon), 30, parseFloat(radius) || 1.5);
+    const stops = await findNearbyStops(parsedLat, parsedLon, 9999, parseFloat(radius) || 1.5);
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ stops }) };
   } catch (e) {
     console.error('Stops error:', e);
