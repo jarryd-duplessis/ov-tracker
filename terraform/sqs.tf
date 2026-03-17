@@ -18,7 +18,7 @@ resource "aws_sqs_queue" "poll" {
     maxReceiveCount     = 3
   })
   # Visibility timeout must be > Lambda timeout to prevent duplicate processing
-  visibility_timeout_seconds = 60
+  visibility_timeout_seconds = 90
   message_retention_seconds  = 3600 # 1h — poll messages are short-lived
 }
 

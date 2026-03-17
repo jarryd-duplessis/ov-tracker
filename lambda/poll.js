@@ -89,10 +89,6 @@ async function processGroup(groupKey, stopCodes) {
     }
   }));
 
-  // Re-schedule the next poll in 15 seconds
-  await sqs.send(new SendMessageCommand({
-    QueueUrl: QUEUE_URL,
-    MessageBody: JSON.stringify({ groupKey, stopCodes }),
-    DelaySeconds: 15,
-  }));
+  // Self-rescheduling removed — frontend now polls /api/departures directly via HTTP.
+  // Lambda→SQS→Lambda was flagged as a recursive loop by AWS.
 }

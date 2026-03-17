@@ -1,76 +1,97 @@
-# stops.js — GTFS Stop Cache
+# lambda/lib/stops.js — GTFS Stop Cache
 
 ## Role
-Downloads and caches the KV7 GTFS stops dataset. Provides `findNearbyStops` for the `/api/stops/nearby` endpoint. Uses a two-tier cache (in-memory + disk) backed by a pre-baked `stops_cache.json` in the Docker image.
+S3-backed stop dataset for Lambda. Loads the merged KV7 + openov-nl GTFS stops from S3 (`stops_cache.json`) and provides `findNearbyStops` for the `/api/stops/nearby` endpoint. Module-level in-memory cache persists across warm Lambda invocations.
 
-## Data Source
-`https://gtfs.ovapi.nl/govi/gtfs-kv7-YYYYMMDD.zip`
+The cache is refreshed daily by the `refresh_stops` Lambda (EventBridge at 03:00 UTC), which downloads, merges, deduplicates, and writes a fresh `stops_cache.json` to S3.
 
-- KV7 GTFS: bus/tram/metro stops from Dutch regional operators
-- Daily file, date in filename — tries today and 3 previous days if today's isn't published yet
-- `stop_id` in KV7 corresponds directly to the TPC codes used by OVapi's `/tpc/` endpoint
-- `location_type != '0'` entries (station nodes, entrances) are excluded; only physical platforms are kept
-- Stops outside Netherlands bounds (lat 50.5–53.7, lon 3.3–7.3) are excluded at import time
+## Data Sources (populated by `refresh_stops`)
+
+### KV7 GTFS (`gtfs.ovapi.nl/govi/gtfs-kv7-YYYYMMDD.zip`)
+- Bus, tram, and metro stops from Dutch regional operators
+- Daily file — tries today and 3 previous days if today's isn't published yet
+- `stop_id` values correspond directly to OVapi TPC codes (8-digit format)
+- Stops outside NL bounds (lat 50.5–53.7, lon 3.3–7.3) excluded
+
+### openov-nl GTFS (`gtfs.ovapi.nl/openov-nl/gtfs-openov-nl.zip`)
+- Full NL network: includes NS rail stations, ferry stops, and stops missing from KV7
+- Stop IDs are 7-digit GTFS stop_id values — **not** recognised by OVapi's `/tpc/` endpoint
+- Only stops more than 15 m from any KV7 stop are added (deduplication via spatial grid)
+
+The merged result is written to S3 as `{ stops: Stop[], timestamp: number }`.
 
 ## Cache Hierarchy
 
 ```
-1. In-memory (stopsCache)         — fastest, lost on container restart
-2. Disk (stops_cache.json)        — baked into Docker image at build time, survives between requests
-3. Fresh KV7 download             — triggered when disk cache is stale (> 7 days)
+1. In-memory (module variable)  — fastest; survives warm Lambda invocations
+2. S3 (stops_cache.json)        — shared across all containers; cold start reads from here
+3. Error                        — if S3 fails and no in-memory cache: throws (HTTP 500)
 ```
 
-**TTL: 7 days** — if the disk cache is within 7 days old it is used as-is. On expiry, a fresh download is attempted. If the download fails, the stale in-memory cache is served with a log warning and the TTL clock is reset (no hammering on repeated requests).
-
-**Size guard on refresh** — a fresh download is only written to disk if it contains ≥ 80% of the existing stop count. This prevents a partial/regional KV7 file (e.g. ~1,500 stops for one operator) from silently replacing the full national cache (~33,000+ stops).
+**In-memory TTL: 7 days** — if the in-memory cache is within 7 days old, it is used as-is without hitting S3.
 
 ## Functions
 
 ### `getStops()`
-Returns the full stops array. Checks in-memory cache → disk cache → download, in that order. Always loads the disk cache into memory even if stale, so it's available as a fallback. Applies NL-bounds filter when loading from disk to strip any bogus-coordinate entries.
+Returns the full stops array. Checks in-memory cache first; on miss (cold start or TTL expired), reads from S3. Applies NL-bounds filter on load to strip any bogus-coordinate entries. If S3 fails and in-memory cache is non-empty, returns stale cache with a warning.
 
 ### `findNearbyStops(lat, lon, maxResults = 30, maxDistanceKm = 1.0)`
 1. Calls `getStops()`
-2. Computes Haversine distance from `(lat, lon)` to each stop
+2. Computes Haversine distance to each stop
 3. Filters to `<= maxDistanceKm`
-4. Sorts by distance ascending
-5. Proximity-deduplicates: any stop within 20m of an already-kept stop is dropped
+4. Sorts ascending by distance
+5. Deduplicates: any stop within 10 m of an already-kept stop is dropped
 6. Returns up to `maxResults` stops
 
-### `downloadStops()`
-Tries each KV7 GTFS URL (today → 3 days back) with `wget`. Extracts `stops.txt` from the zip via `unzip -p` (20 MB buffer). Parses with RFC 4180-compliant CSV parser. Skips stops outside NL bounds. Returns array of stop objects.
+### `downloadStops()` (called only by `refresh_stops` Lambda)
+Uses `fetch` + `jszip` (no `wget` or `unzip` — Lambda has no shell utilities).
+1. Downloads KV7 zip for today or up to 3 prior days
+2. Downloads openov-nl zip
+3. Parses both `stops.txt` files
+4. Builds a spatial grid from KV7 stops (100 m cells)
+5. Adds openov-nl stops that are > 15 m from any KV7 stop
+6. Returns merged array
+
+### `buildSpatialGrid(stops)` / `isNearAny(lat, lon, grid, distKm)`
+Spatial grid keyed by `floor(lat*1000),floor(lon*1000)` (~100 m cells). Used to efficiently check whether an openov-nl stop is already represented by a nearby KV7 stop.
 
 ### `parseCsvLine(line)`
-RFC 4180-compliant CSV field splitter. Handles quoted fields and `""` escape sequences inside quoted strings.
+RFC 4180-compliant CSV field splitter — handles quoted fields and `""` escape sequences.
 
 ### `haversineDistance(lat1, lon1, lat2, lon2)`
 Returns distance in km between two WGS-84 coordinates.
 
+### `saveToS3(data)` (called by `refresh_stops` Lambda)
+Writes `{ stops, timestamp }` to `stops_cache.json` in the ops S3 bucket.
+
 ## Stop object shape
 ```js
 {
-  id: string,       // GTFS stop_id (= OVapi TPC code)
+  id: string,       // GTFS stop_id (= OVapi TPC code for KV7 stops)
   name: string,     // stop_name from GTFS
   lat: number,
   lon: number,
-  tpc: string,      // same as id — used by frontend for WebSocket subscribe
+  tpc: string,      // same as id — used by frontend for stop identification
+  distance: number, // km from query point, added by findNearbyStops
 }
 ```
 
-## Docker image pre-baking
-The `stops_cache.json` file is committed to the repo and included in the Docker image (removed from `.dockerignore`). At image build time the Dockerfile stamps its `timestamp` field to the build time, so containers start with a fresh 7-day TTL and never need to download on boot.
+## KV7 vs openov-nl stop types
+
+The frontend distinguishes stop types by TPC code length:
+- **KV7 stops**: 8-digit TPC (e.g. `NL:Q:13006600`-style, stored as 8+ chars) — valid OVapi TPC codes
+- **openov-nl stops**: 7-digit IDs — visible on map, but not recognised by OVapi
+
+When a user clicks an openov-nl stop, `App.jsx` (`handleStopClick`) finds nearby KV7 stops and subscribes to those instead. If no KV7 stops are within 300 m, it calls `fetchNearbyStops` on that location to find any.
 
 ## Known Issues
-- **Bogus coordinates in source data** — 4,697 stops in the baked-in cache had coordinates at (47.97°N, 3.31°E) — a location in France — due to a placeholder value in the upstream GTFS export. These entries have been filtered out of `stops_cache.json` and are now excluded at load time. The affected stops (mostly rural Connexxion/Arriva routes: 20xxx, 22xxx, 66xxx TPC ranges) will remain invisible until OVapi corrects the source data.
-- **KV7 coverage varies by day** — the KV7 daily zip size has ranged from ~4.6 MB (1,501 stops, single operator) to ~37 MB (full national set). The size guard prevents a small file from replacing a large cache, but means a partial download silently falls back with no benefit.
-- **No partial refresh** — if the download fails, the entire stale cache is served. There's no incremental update.
-- **`wget` synchronous** — `downloadStops` calls `execSync`, blocking the Node event loop for the duration of the download. Concurrent requests during download will be delayed.
-- **20m dedup threshold** — some legitimate adjacent stops (e.g. two directions at the same intersection) may be within 20m and one will be dropped.
-- **No RAIL/FERRY/SUBWAY TPC codes** — KV7 only includes bus/tram/metro. Rail station TPC codes are not in this dataset.
-- **OVapi KV7 rate limiting** — the daily zip download returns 429 when hit repeatedly from the same IP. The fallback to existing cache handles this gracefully but means fresh data isn't always available.
+- **openov-nl stops have no departure data** — 7-digit IDs are unknown to OVapi. They appear on the map but clicking them falls back to nearby KV7 stops.
+- **KV7 coverage varies by day** — The daily KV7 zip size has ranged from ~4 MB (partial) to ~37 MB (full national). The merged cache retains whichever set was loaded most recently by `refresh_stops`.
+- **No size guard in Lambda version** — The Express backend had an 80% size guard preventing a small KV7 file from replacing a large cache. The Lambda `refresh_stops` does not currently implement this guard.
+- **10 m dedup threshold** — Adjacent stops on opposite sides of a road (typically 15–30 m apart) are kept distinct. Stops within 10 m are assumed to be the same physical pole.
+- **S3 cold start** — First request on a cold Lambda container reads `stops_cache.json` from S3 (~20 ms). No pre-warming.
 
 ## Planned Changes
-- **Async download** — replace `execSync` + `wget` with `node-fetch` streaming download to avoid blocking the event loop.
-- **Configurable dedup threshold** — expose the 20m threshold so it can be tuned per-environment.
-- **RAIL stop coverage** — source NS/ProRail TPC codes to enable rail departure lookups.
-- **Coordinate repair** — when a fresh KV7 download provides correct coordinates for a TPC code that previously had bogus ones, merge them into the existing cache rather than doing a full replace.
+- **Size guard on refresh** — Warn and abort if new KV7 download contains fewer stops than 80% of the cached set.
+- **Partial merge on refresh** — Only replace stops from operators present in the new download; preserve other operators' stops.
+- **RAIL/FERRY TPC codes** — If OVapi gains endpoints for NS trains or ferry operators, sourcing those TPC codes would require extending the KV7 or a separate feed.

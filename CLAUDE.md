@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-### Backend (`cd backend`)
+### Local dev backend (`cd backend`)
 ```bash
 npm install        # install dependencies
 npm run dev        # start with nodemon (auto-reload)
 npm start          # start without auto-reload
 ```
-Backend runs on `http://localhost:3001`. On first start it downloads the GTFS stops file (~200MB) and caches it to `stops_cache.json`.
+Backend runs on `http://localhost:3001`. On first start it downloads and merges KV7 + openov-nl GTFS stops and caches to `stops_cache.json`.
 
 ### Frontend (`cd frontend`)
 ```bash
@@ -21,43 +21,68 @@ npm run preview    # preview production build
 ```
 Frontend runs on `http://localhost:3000`.
 
+### Lambda deploy (`cd terraform`)
+```bash
+terraform apply    # zip lambda/, update all Lambda functions, wire API Gateway
+```
+
 There are no test suites in this project.
 
 ## Architecture
 
 **Komt ie?** is a live Dutch public transport tracker. The core value proposition is showing whether a departure is `LIVE` (vehicle broadcasting a GPS position) vs `SCHEDULED` (timetable only).
 
+### Production: Lambda + API Gateway v2
+
+```
+Browser → CloudFront → API Gateway HTTP → Lambda (http_*)
+       → CloudFront → S3 (React build)
+       → API Gateway WebSocket → Lambda (connect/disconnect/ws_message)
+```
+
 ### Data flow
 
-1. Frontend requests browser GPS → calls `GET /api/stops/nearby` → opens WebSocket → sends `{ type: 'subscribe', stopCodes: [...] }`
-2. Backend per-client interval (15s) polls OVapi → parses response → pushes `{ type: 'departures', departures: [...] }` over WebSocket
-3. Frontend updates the map and departure board in real time
+1. Frontend requests GPS → calls `GET /api/stops/nearby` → renders stop markers on map
+2. Frontend polls `GET /api/departures?stops=TPC1,TPC2` every ~14 s
+3. `http_departures` Lambda checks DynamoDB cache (14 s TTL) → on miss fetches OVapi and writes cache (fire-and-forget)
+4. Frontend updates departure board in real time
+5. WebSocket is open for future server-push; subscribe messages are stored in DynamoDB but not acted on today
 
-### Backend modules
+### Lambda modules (`lambda/`)
 
-- **`server.js`** — Express + WebSocket server. Manages per-client subscriptions in `clientSubscriptions` Map (ws → `{ stopCodes, interval }`). Also has REST endpoints for `/departures`, `/vehicles`, and `/journey` (journey planner via Motis + Nominatim geocoding).
-- **`ovapi.js`** — OVapi client. `parseTpcResponse` converts raw OVapi passtime objects into clean departure objects. `confidence` field is `'live'` or `'scheduled'` based on whether `RealtimeArrival` is present.
-- **`stops.js`** — GTFS stop data. Downloads `stops.txt` from OVapi on first run, caches to disk (`stops_cache.json`) and in memory, refreshes every 24h. `findNearbyStops` uses Haversine distance.
-- **`vehicles.js`** — Fetches live vehicle positions from GTFS-RT protobuf feed (`vehiclePositions.pb`). Uses `routes.txt` (bundled in repo) to enrich with line name and color.
+- **`http_stops.js`** — Returns nearby stops from S3-cached GTFS data.
+- **`http_departures.js`** — Cache-aside with DynamoDB (14 s TTL). On miss: fetches OVapi, writes cache fire-and-forget.
+- **`http_vehicles.js`** — Returns vehicle positions. Delegates to `lib/vehicles.js` for two-tier cache (in-memory 5 s + S3 8 s).
+- **`http_journey.js`** — Geocodes via Nominatim → fetches Motis itineraries. Accepts `fromLat`/`fromLon` to bypass geocoding for known stop coordinates.
+- **`http_trip.js`** — Returns trip stops for a vehicle. Accepts `vehicleId` and optional `line` param. Used by TripPanel and for route-snapped dead reckoning path data.
+- **`connect.js` / `disconnect.js`** — WS lifecycle; read/write DynamoDB `connections` table.
+- **`ws_message.js`** — Stores subscribe payload in DynamoDB. No active push (SQS loop disabled).
+- **`refresh_stops.js`** — Downloads KV7 + openov-nl GTFS, merges (KV7-first, dedup at 15 m), writes `stops_cache.json` to S3. Triggered by EventBridge daily at 03:00 UTC.
+- **`lib/ovapi.js`** — OVapi client + parser. `confidence: 'live'` when `RealtimeArrival` present.
+- **`lib/stops.js`** — S3-backed stops cache. Module-level in-memory cache across warm invocations.
+- **`lib/vehicles.js`** — Two-tier vehicle cache. Computes speed and bearing from consecutive position deltas (the Dutch GTFS-RT feed provides zero for both). Returns `{ vehicles, fetchedAt }`.
 
-### Frontend modules
+### Frontend modules (`frontend/src/`)
 
-- **`App.jsx`** — Root component. Owns `userLocation`, `nearbyStops`, and mode (`nearby` | `journey`). Calls `useOVWebSocket` and wires location → stop fetch → WebSocket subscription.
-- **`useOVWebSocket.js`** — Custom hook managing a single WebSocket connection with auto-reconnect (3s delay). Exposes `{ departures, connected, lastUpdate, error, subscribe }`.
-- **`Map.jsx`** — MapLibre GL JS map showing user location, nearby stop markers, and departures.
-- **`DepartureBoard.jsx`** — Sidebar departure list; shows line, destination, minutes until arrival, and LIVE/SCHEDULED badge.
-- **`JourneyPlanner.jsx`** — Journey planning UI; calls backend `/journey` endpoint.
+- **`App.jsx`** — Root component. Owns `userLocation`, `nearbyStops`, `journeyRoute`, `mapCenter`, `trackedDeparture`, `savedTrips`, `selectedVehicle`, `theme`, mode (`nearby` | `journey` | `saved`). `userSelectedStopRef` prevents GPS/pan overrides after explicit stop selection. `routeEpochRef` invalidates in-flight route fetches on stop/vehicle clicks. Dark/light theme toggle persisted to localStorage.
+- **`useOVWebSocket.js`** — Manages WS connection + auto-reconnect. Exposes `{ departures, connected, lastUpdate, error, subscribe }`. Filters to KV7 stops only (≥ 8-digit TPC) before sending to OVapi.
+- **`Map.jsx`** — MapLibre GL JS map with dark/light tile switching. Incremental stop marker updates (keyed by TPC, no flicker). Route polyline from Motis leg geometry. Vehicle animation system: smooth GPS interpolation (1.5s) → route-snapped dead reckoning along fetched trip paths. `userInitiated` flag prevents programmatic flyTo from re-triggering stop fetches.
+- **`DepartureBoard.jsx`** — Departure list. Tracked rows show expanded panel ("Route shown on map" + "Stop tracking" button). Filter tabs auto-reset when transport types change.
+- **`JourneyPlanner.jsx`** — Journey search. "Select this journey" button switches to map view and draws route.
+- **`SavedTrips.jsx`** — Starred trips persisted in localStorage with 30 s countdown ticks.
+- **`TripPanel.jsx`** — Slide-in panel showing a vehicle's route stops with timeline visualization. Fetches from `/api/trip`. Shown when a vehicle marker is clicked on the map.
 
-### Vite proxy
+### Vite proxy (local dev)
 
-Frontend proxies `/api/*` → `http://localhost:3001` and `/ws` → `ws://localhost:3001`, so all fetch/WebSocket calls use relative paths in frontend code.
+Frontend proxies `/api/*` → `http://localhost:3001` and `/ws` → `ws://localhost:3001`.
 
 ### External APIs
 
 | API | Purpose |
 |-----|---------|
 | `v0.ovapi.nl/tpc/{codes}` | Live departure data (GOVI license — data must not be stored >30 min) |
-| `gtfs.ovapi.nl/new/stops.txt` | All Dutch OV stops with coordinates |
+| `gtfs.ovapi.nl/govi/gtfs-kv7-YYYYMMDD.zip` | KV7 bus/tram/metro stops (OVapi TPC codes) |
+| `gtfs.ovapi.nl/openov-nl/gtfs-openov-nl.zip` | Full NL GTFS incl. NS rail and ferry |
 | `gtfs.ovapi.nl/nl/vehiclePositions.pb` | Live vehicle GPS positions (GTFS-RT protobuf) |
 | `europe.motis-project.de/api/v1/plan` | Journey planning |
 | `nominatim.openstreetmap.org` | Geocoding for journey planner |

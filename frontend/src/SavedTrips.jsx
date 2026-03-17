@@ -7,11 +7,10 @@ function formatCountdown(expectedTime) {
   const mins = Math.round((new Date(expectedTime) - Date.now()) / 60000);
   if (mins < -2) return 'Departed';
   if (mins <= 0) return 'NU';
-  return `${mins} min`;
+  return `${mins}'`;
 }
 
 export default function SavedTrips({ savedTrips, onUnsave, onTrack, trackedId }) {
-  // Tick every 30s to refresh countdowns
   const [, tick] = useState(0);
   useEffect(() => {
     const t = setInterval(() => tick(n => n + 1), 30000);
@@ -20,11 +19,15 @@ export default function SavedTrips({ savedTrips, onUnsave, onTrack, trackedId })
 
   if (savedTrips.length === 0) {
     return (
-      <div style={{ padding: 32, textAlign: 'center', color: '#555', fontSize: 13 }}>
-        No saved trips.<br />
-        <span style={{ marginTop: 8, display: 'block', color: '#444' }}>
-          Tap ⭐ on any departure to save it here.
-        </span>
+      <div style={{
+        padding: 48, textAlign: 'center',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+      }}>
+        <span style={{ fontSize: 28, opacity: 0.3 }}>⭐</span>
+        <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No saved trips</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11, opacity: 0.7 }}>
+          Tap the star on any departure to save it
+        </div>
       </div>
     );
   }
@@ -44,73 +47,76 @@ export default function SavedTrips({ savedTrips, onUnsave, onTrack, trackedId })
 
         return (
           <div key={trip.id} style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '12px 16px',
-            borderBottom: '1px solid #1e2130',
-            borderLeft: isTracked ? '3px solid #4FC3F7' : '3px solid transparent',
-            background: isTracked ? 'rgba(79,195,247,0.05)' : 'transparent',
-            opacity: departed ? 0.45 : 1,
-            transition: 'opacity 0.3s',
+            borderBottom: '1px solid var(--border)',
+            borderLeft: isTracked ? '3px solid var(--accent)' : '3px solid transparent',
+            background: isTracked ? 'var(--accent-bg)' : 'transparent',
+            opacity: departed ? 0.35 : 1,
+            transition: 'opacity 0.3s, background 0.2s',
+            padding: '12px 14px',
           }}>
-            {/* Line badge */}
-            <div style={{
-              minWidth: 44, height: 36, background: colour, borderRadius: 8,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontWeight: 800, fontSize: 14, color: 'white', flexShrink: 0
-            }}>
-              {icon} {trip.line}
-            </div>
-
-            {/* Destination + stop */}
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {/* Line badge */}
               <div style={{
-                fontWeight: 600, fontSize: 14, color: '#e8eaed',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                minWidth: 42, height: 30, background: colour,
+                borderRadius: 'var(--radius-sm)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontWeight: 800, fontSize: 12, color: 'white', flexShrink: 0,
+                gap: 3, boxShadow: 'var(--shadow-sm)',
               }}>
-                {trip.destination}
+                {icon} {trip.line}
               </div>
-              <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
-                🚏 {trip.stopName} · {time}
+
+              {/* Info */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontWeight: 600, fontSize: 13, color: 'var(--text)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>
+                  {trip.destination}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, fontVariantNumeric: 'tabular-nums' }}>
+                  {trip.stopName} · {time}
+                </div>
+              </div>
+
+              {/* Countdown */}
+              <div style={{
+                flexShrink: 0, minWidth: 44, textAlign: 'right',
+                fontSize: isNow ? 16 : 18, fontWeight: 800,
+                fontVariantNumeric: 'tabular-nums',
+                color: isNow ? 'var(--green)' : departed ? 'var(--text-muted)' : 'var(--text)',
+                ...(isNow && {
+                  background: 'var(--green-bg)',
+                  padding: '2px 8px',
+                  borderRadius: 'var(--radius-sm)',
+                }),
+              }}>
+                {cd}
               </div>
             </div>
 
-            {/* Countdown */}
-            <div style={{
-              textAlign: 'right', flexShrink: 0,
-              fontSize: isNow ? 20 : 14,
-              fontWeight: 800,
-              color: isNow ? '#4CAF50' : departed ? '#555' : '#e8eaed',
-              minWidth: 52,
-            }}>
-              {cd}
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+            {/* Actions — horizontal */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
               {!departed && (
-                <button
-                  onClick={() => onTrack(isTracked ? null : trip)}
-                  style={{
-                    background: isTracked ? '#4FC3F7' : '#1e2130',
-                    border: 'none', borderRadius: 6, padding: '4px 8px',
-                    color: isTracked ? '#000' : '#888',
-                    fontSize: 11, fontWeight: 600, cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {isTracked ? '📍 On' : '📍 Track'}
+                <button onClick={() => onTrack(isTracked ? null : trip)} style={{
+                  flex: 1,
+                  background: isTracked ? 'var(--accent)' : 'var(--bg-surface)',
+                  border: `1px solid ${isTracked ? 'var(--accent)' : 'var(--border)'}`,
+                  borderRadius: 'var(--radius-sm)', padding: '6px 12px',
+                  color: isTracked ? '#000' : 'var(--text-secondary)',
+                  fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                }}>
+                  {isTracked ? '📍 Tracking' : '📍 Track'}
                 </button>
               )}
-              <button
-                onClick={() => onUnsave(trip.id)}
-                style={{
-                  background: '#1e2130', border: 'none', borderRadius: 6,
-                  padding: '4px 8px', color: '#666', fontSize: 11, cursor: 'pointer',
-                }}
-              >
-                ✕
+              <button onClick={() => onUnsave(trip.id)} style={{
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '6px 12px', color: 'var(--text-muted)',
+                fontSize: 11, cursor: 'pointer',
+              }}>
+                Remove
               </button>
             </div>
           </div>

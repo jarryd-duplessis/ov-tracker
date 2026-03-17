@@ -4,18 +4,119 @@
   padding: 0;
 }
 
+/* ── Theme tokens ──────────────────────────────────────────────────────── */
+:root {
+  --bg:            #0c0e14;
+  --bg-card:       #12141c;
+  --bg-surface:    #1a1d2a;
+  --bg-hover:      #222538;
+  --border:        #242840;
+  --text:          #eaecf0;
+  --text-secondary:#9ca3af;
+  --text-muted:    #5c6370;
+  --accent:        #38bdf8;
+  --accent-bg:     rgba(56,189,248,0.1);
+  --accent-border: rgba(56,189,248,0.3);
+  --accent-hover:  #7dd3fc;
+  --green:         #4ade80;
+  --green-bg:      rgba(74,222,128,0.1);
+  --orange:        #fb923c;
+  --orange-bg:     rgba(251,146,60,0.1);
+  --red:           #f87171;
+  --red-bg:        rgba(248,113,113,0.1);
+  --stop-bg:       #1a1d2a;
+  --stop-border:   #3b3f54;
+  --stop-text:     #d1d5db;
+  --vehicle-border:rgba(255,255,255,0.8);
+  --shadow-sm:     0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:     0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:     0 8px 24px rgba(0,0,0,0.6);
+  --radius-sm:     6px;
+  --radius-md:     10px;
+  --radius-lg:     14px;
+  --radius-full:   9999px;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg:            #f0f2f5;
+  --bg-card:       #ffffff;
+  --bg-surface:    #e8ebed;
+  --bg-hover:      #dfe2e6;
+  --border:        #d1d5db;
+  --text:          #111827;
+  --text-secondary:#4b5563;
+  --text-muted:    #9ca3af;
+  --accent:        #0284c7;
+  --accent-bg:     rgba(2,132,199,0.08);
+  --accent-border: rgba(2,132,199,0.3);
+  --accent-hover:  #0369a1;
+  --green:         #16a34a;
+  --green-bg:      rgba(22,163,74,0.08);
+  --orange:        #ea580c;
+  --orange-bg:     rgba(234,88,12,0.08);
+  --red:           #dc2626;
+  --red-bg:        rgba(220,38,38,0.08);
+  --stop-bg:       #ffffff;
+  --stop-border:   #9ca3af;
+  --stop-text:     #374151;
+  --vehicle-border:rgba(0,0,0,0.25);
+  --shadow-sm:     0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md:     0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg:     0 8px 24px rgba(0,0,0,0.12);
+  color-scheme: light;
+}
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: #0f1117;
-  color: #e8eaed;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+  background: var(--bg);
+  color: var(--text);
   height: 100dvh;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* Prevent iOS zoom on input focus */
+input, select, textarea {
+  font-size: 16px !important;
+  font-family: inherit;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Focus ring */
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+
+button:active {
+  transform: scale(0.97);
 }
 
 /* MapLibre overrides */
@@ -25,4 +126,30 @@ body {
 
 .maplibregl-ctrl-attrib {
   font-size: 10px;
+}
+
+/* Animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.4); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes trackPulse {
+  0%   { transform: scale(1);   opacity: 0.8; }
+  100% { transform: scale(2.2); opacity: 0; }
 }

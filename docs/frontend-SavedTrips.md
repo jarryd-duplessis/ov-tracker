@@ -3,6 +3,8 @@
 ## Role
 Shows a list of trips the user has starred, with live countdowns and track/remove actions. Persisted across sessions via localStorage. Shown when mode is `'saved'`.
 
+Uses CSS design tokens for consistent theming. The '✕ Remove' button shows text instead of just an icon for better touch accessibility.
+
 ## Props
 | Prop | Type | Description |
 |---|---|---|
@@ -12,7 +14,7 @@ Shows a list of trips the user has starred, with live countdowns and track/remov
 | `trackedId` | `string\|null` | Highlights the row of the currently tracked trip |
 
 ## Trip object shape
-Trips are saved departure objects with an added `id` and `stopName`:
+Saved departure objects with an added `id` and `stopName`:
 ```js
 {
   id: string,          // "{stopCode}-{journeyNumber}"
@@ -46,13 +48,13 @@ value: JSON array of Trip objects
 App loads this on mount via `loadSavedTrips()` and writes on every toggle.
 
 ## Known Issues
-- **`expectedTime` is frozen at save time** — the countdown is based on the original scheduled/expected time, not updated by new WS data. If the trip gets delayed after saving, the countdown is wrong.
+- **`expectedTime` is frozen at save time** — The countdown is based on the original scheduled/expected time, not updated by new poll data. If the trip gets delayed after saving, the countdown is wrong.
 - **Departed trips never auto-remove** — "Departed" rows accumulate until the user manually removes them. The active count badge in App filters them out (> −3 min) but the rows stay visible.
-- **No re-subscription for saved stops** — switching to Saved mode doesn't subscribe to those stops' TPC codes, so the vehicle tracking may fail if the WS subscription has moved on to different stops.
-- **Duplicate saves possible** — if the same departure appears under two different stop codes (rare but possible for multi-platform stops), it can be saved twice with different IDs.
+- **No re-subscription for saved stops** — Switching to Saved mode doesn't subscribe to those stops' TPC codes, so the vehicle tracking may fail if the HTTP poll subscription has moved on to different stops.
+- **Duplicate saves possible** — If the same departure appears under two different stop codes (rare but possible for multi-platform stops), it can be saved twice with different IDs.
 
 ## Planned Changes
-- **Auto-remove departed trips after N minutes** — clean up rows more than 10 min past departure.
-- **Live time updates from WS** — when WS pushes new departures, find matching saved trips and update their `expectedTime`.
-- **Re-subscribe to saved stop codes when Saved tab is active** — ensures departure data for saved trips stays fresh even when the user isn't near those stops.
-- **Group by departure date** — saved trips from different days should be visually separated.
+- **Auto-remove departed trips after N minutes** — Clean up rows more than 10 min past departure.
+- **Live time updates from poll** — When `/api/departures` returns new data, find matching saved trips and update their `expectedTime`.
+- **Re-subscribe to saved stop codes when Saved tab is active** — Ensures departure data for saved trips stays fresh even when the user isn't near those stops.
+- **Group by departure date** — Saved trips from different days should be visually separated.

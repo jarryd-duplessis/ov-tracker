@@ -14,10 +14,10 @@ const CORS = {
 
 exports.handler = async (event) => {
   try {
-    const vehicles = await getVehiclePositions();
+    const { vehicles, fetchedAt } = await getVehiclePositions();
     return {
       statusCode: 200, headers: CORS,
-      body: JSON.stringify({ vehicles, fetchedAt: new Date().toISOString() }),
+      body: JSON.stringify({ vehicles, fetchedAt: new Date(fetchedAt).toISOString() }),
     };
   } catch (e) {
     console.error('Vehicles error:', e);

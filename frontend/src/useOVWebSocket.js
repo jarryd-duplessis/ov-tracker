@@ -1,80 +1,64 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-// In development the Vite proxy handles /ws → localhost:3001.
-// In production set VITE_WS_URL=wss://ws.ov.jarryd.co.za at build time.
-const WS_URL = import.meta.env.VITE_WS_URL ||
-  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+const POLL_INTERVAL = 15000;
 
+// Replaces the WebSocket push model (which caused a Lambda→SQS recursive loop)
+// with direct HTTP polling of /api/departures. Same interface, no backend loop.
 export function useOVWebSocket() {
-  const ws = useRef(null);
   const [departures, setDepartures] = useState([]);
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [error, setError] = useState(null);
-  const reconnectTimer = useRef(null);
-  const subscribeTimer = useRef(null);
+
   const currentStops = useRef([]);
+  const intervalRef = useRef(null);
+  const debounceRef = useRef(null);
 
-  const connect = useCallback(() => {
-    if (ws.current?.readyState === WebSocket.OPEN) return;
-
-    ws.current = new WebSocket(WS_URL);
-
-    ws.current.onopen = () => {
+  const fetchDepartures = useCallback(async () => {
+    const stops = currentStops.current;
+    if (stops.length === 0) return;
+    // Only pass KV7 stop codes (8+ digits) — openov-nl IDs return 404 from OVapi
+    const kv7 = stops.filter(s => s.length >= 8);
+    if (kv7.length === 0) { setDepartures([]); return; }
+    try {
+      const res = await fetch(`/api/departures?stops=${kv7.join(',')}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDepartures(data.departures || []);
+      setLastUpdate(new Date(data.fetchedAt));
       setConnected(true);
       setError(null);
-      // Re-subscribe immediately on reconnect (no debounce needed — this is a fresh connection)
-      if (currentStops.current.length > 0) {
-        ws.current.send(JSON.stringify({ type: 'subscribe', stopCodes: currentStops.current }));
-      }
-    };
-
-    ws.current.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'departures') {
-          setDepartures(msg.departures);
-          setLastUpdate(new Date(msg.fetchedAt));
-        }
-        if (msg.type === 'error') {
-          setError(msg.message);
-        }
-      } catch (e) {
-        console.error('WS parse error:', e);
-      }
-    };
-
-    ws.current.onclose = () => {
+    } catch (e) {
       setConnected(false);
-      // Reconnect after 3 seconds
-      reconnectTimer.current = setTimeout(connect, 3000);
-    };
-
-    ws.current.onerror = () => {
-      setError('Connection error — retrying...');
-    };
+      setError('Could not fetch departures — retrying...');
+    }
   }, []);
 
-  const subscribe = useCallback((stopCodes) => {
+  const subscribe = useCallback((stopCodes, { immediate = false } = {}) => {
     currentStops.current = stopCodes;
-    // Debounce: GPS updates and map moves fire rapidly. Collapse multiple
-    // subscribe calls within 800ms into one to avoid thrashing poll groups.
-    clearTimeout(subscribeTimer.current);
-    subscribeTimer.current = setTimeout(() => {
-      if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({ type: 'subscribe', stopCodes: currentStops.current }));
-      }
-    }, 800);
-  }, []);
+    clearTimeout(debounceRef.current);
+    clearInterval(intervalRef.current);
+    if (immediate) {
+      // User explicitly selected a stop — clear stale departures and fetch now
+      setDepartures([]);
+      fetchDepartures();
+      intervalRef.current = setInterval(fetchDepartures, POLL_INTERVAL);
+    } else {
+      // Debounce rapid calls (GPS updates, map pans)
+      debounceRef.current = setTimeout(() => {
+        clearInterval(intervalRef.current);
+        fetchDepartures();
+        intervalRef.current = setInterval(fetchDepartures, POLL_INTERVAL);
+      }, 800);
+    }
+  }, [fetchDepartures]);
 
   useEffect(() => {
-    connect();
     return () => {
-      clearTimeout(reconnectTimer.current);
-      clearTimeout(subscribeTimer.current);
-      ws.current?.close();
+      clearTimeout(debounceRef.current);
+      clearInterval(intervalRef.current);
     };
-  }, [connect]);
+  }, []);
 
   return { departures, connected, lastUpdate, error, subscribe };
 }

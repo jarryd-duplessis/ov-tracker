@@ -12,6 +12,37 @@ locals {
   http_origin_id = "http-api"
 }
 
+resource "aws_cloudfront_response_headers_policy" "security_headers" {
+  name = "${var.app_name}-security-headers"
+
+  security_headers_config {
+    content_type_options {
+      override = true
+    }
+
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = true
+      override                   = true
+    }
+
+    content_security_policy {
+      content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tiles.openfreemap.org; connect-src 'self' wss://ws.ov.jarryd.co.za https://tiles.openfreemap.org https://nominatim.openstreetmap.org; worker-src blob:; child-src blob:"
+      override                = true
+    }
+
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+  }
+}
+
 resource "aws_cloudfront_distribution" "main" {
   enabled             = true
   is_ipv6_enabled     = true
@@ -48,16 +79,10 @@ resource "aws_cloudfront_distribution" "main" {
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
 
-    forwarded_values {
-      query_string = true
-      headers      = ["Origin", "Authorization"]
-      cookies { forward = "none" }
-    }
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewerExceptHostHeader
 
-    min_ttl     = 0
-    default_ttl = 0
-    max_ttl     = 0
-    compress    = true
+    compress = true
   }
 
   # ── Default behaviour: /* → S3 frontend ──────────────────────────────────
@@ -68,15 +93,10 @@ resource "aws_cloudfront_distribution" "main" {
     allowed_methods = ["GET", "HEAD", "OPTIONS"]
     cached_methods  = ["GET", "HEAD"]
 
-    forwarded_values {
-      query_string = false
-      cookies { forward = "none" }
-    }
+    cache_policy_id            = "658327ea-f89d-4fab-a63d-7e88639e58f6" # CachingOptimized
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
 
-    min_ttl     = 0
-    default_ttl = 86400   # 1 day for static assets
-    max_ttl     = 31536000 # 1 year for content-hashed bundles
-    compress    = true
+    compress = true
   }
 
   # SPA: return index.html for unknown paths so React Router works

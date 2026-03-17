@@ -37,7 +37,7 @@ data "aws_iam_policy_document" "lambda_assume" {
 data "aws_iam_policy_document" "logs" {
   statement {
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:aws:logs:*:*:*"]
+    resources = ["arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"]
   }
 }
 
@@ -71,7 +71,40 @@ data "aws_iam_policy_document" "s3_stops_ro" {
 data "aws_iam_policy_document" "s3_stops_rw" {
   statement {
     actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.ops.arn}/stops_cache.json"]
+    resources = [
+      "${aws_s3_bucket.ops.arn}/stops_cache.json",
+      "${aws_s3_bucket.ops.arn}/trips/*",
+    ]
+  }
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.ops.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["trips/*"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "s3_trips_ro" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.ops.arn}/trips/*"]
+  }
+}
+
+data "aws_iam_policy_document" "departures_cache_rw" {
+  statement {
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.departures_cache.arn]
+  }
+}
+
+data "aws_iam_policy_document" "s3_vehicles_cache_rw" {
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["${aws_s3_bucket.ops.arn}/vehicles_cache.json"]
   }
 }
 
@@ -100,14 +133,15 @@ resource "aws_iam_role_policy" "lambda_connect_ddb" {
 }
 
 resource "aws_lambda_function" "connect" {
-  function_name    = "${var.app_name}-connect"
-  role             = aws_iam_role.lambda_connect.arn
-  handler          = "connect.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-connect"
+  role                           = aws_iam_role.lambda_connect.arn
+  handler                        = "connect.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 50
 
   environment {
     variables = {
@@ -118,7 +152,7 @@ resource "aws_lambda_function" "connect" {
 
 resource "aws_cloudwatch_log_group" "connect" {
   name              = "/aws/lambda/${aws_lambda_function.connect.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── WS DISCONNECT LAMBDA ─────────────────────────────────────────────────────
@@ -139,14 +173,15 @@ resource "aws_iam_role_policy" "lambda_disconnect_ddb" {
 }
 
 resource "aws_lambda_function" "disconnect" {
-  function_name    = "${var.app_name}-disconnect"
-  role             = aws_iam_role.lambda_disconnect.arn
-  handler          = "disconnect.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-disconnect"
+  role                           = aws_iam_role.lambda_disconnect.arn
+  handler                        = "disconnect.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 50
 
   environment {
     variables = {
@@ -157,7 +192,7 @@ resource "aws_lambda_function" "disconnect" {
 
 resource "aws_cloudwatch_log_group" "disconnect" {
   name              = "/aws/lambda/${aws_lambda_function.disconnect.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── WS MESSAGE LAMBDA ────────────────────────────────────────────────────────
@@ -183,14 +218,15 @@ resource "aws_iam_role_policy" "lambda_ws_message_sqs" {
 }
 
 resource "aws_lambda_function" "ws_message" {
-  function_name    = "${var.app_name}-ws-message"
-  role             = aws_iam_role.lambda_ws_message.arn
-  handler          = "ws_message.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-ws-message"
+  role                           = aws_iam_role.lambda_ws_message.arn
+  handler                        = "ws_message.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 50
 
   environment {
     variables = {
@@ -202,7 +238,7 @@ resource "aws_lambda_function" "ws_message" {
 
 resource "aws_cloudwatch_log_group" "ws_message" {
   name              = "/aws/lambda/${aws_lambda_function.ws_message.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── POLL LAMBDA ──────────────────────────────────────────────────────────────
@@ -233,14 +269,15 @@ resource "aws_iam_role_policy" "lambda_poll_apigw" {
 }
 
 resource "aws_lambda_function" "poll" {
-  function_name    = "${var.app_name}-poll"
-  role             = aws_iam_role.lambda_poll.arn
-  handler          = "poll.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.poll_lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-poll"
+  role                           = aws_iam_role.lambda_poll.arn
+  handler                        = "poll.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.poll_lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 10
 
   environment {
     variables = {
@@ -253,14 +290,17 @@ resource "aws_lambda_function" "poll" {
 
 resource "aws_cloudwatch_log_group" "poll" {
   name              = "/aws/lambda/${aws_lambda_function.poll.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
-# SQS → poll Lambda trigger
+# SQS → poll Lambda trigger — DISABLED.
+# The Lambda→SQS→Lambda self-scheduling pattern caused an AWS recursive loop detection event.
+# Departures are now fetched by the frontend via HTTP polling (/api/departures).
 resource "aws_lambda_event_source_mapping" "poll_sqs" {
   event_source_arn = aws_sqs_queue.poll.arn
   function_name    = aws_lambda_function.poll.arn
-  batch_size       = 1 # one group per invocation for predictable per-group behaviour
+  batch_size       = 1
+  enabled          = false
 }
 
 # ─── HTTP STOPS LAMBDA ────────────────────────────────────────────────────────
@@ -281,14 +321,15 @@ resource "aws_iam_role_policy" "lambda_http_stops_s3" {
 }
 
 resource "aws_lambda_function" "http_stops" {
-  function_name    = "${var.app_name}-http-stops"
-  role             = aws_iam_role.lambda_http_stops.arn
-  handler          = "http_stops.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-http-stops"
+  role                           = aws_iam_role.lambda_http_stops.arn
+  handler                        = "http_stops.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 50
 
   environment {
     variables = {
@@ -299,7 +340,7 @@ resource "aws_lambda_function" "http_stops" {
 
 resource "aws_cloudwatch_log_group" "http_stops" {
   name              = "/aws/lambda/${aws_lambda_function.http_stops.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── HTTP DEPARTURES LAMBDA ───────────────────────────────────────────────────
@@ -314,20 +355,32 @@ resource "aws_iam_role_policy" "lambda_http_departures_logs" {
   policy = data.aws_iam_policy_document.logs.json
 }
 
+resource "aws_iam_role_policy" "lambda_http_departures_cache" {
+  role   = aws_iam_role.lambda_http_departures.id
+  policy = data.aws_iam_policy_document.departures_cache_rw.json
+}
+
 resource "aws_lambda_function" "http_departures" {
-  function_name    = "${var.app_name}-http-departures"
-  role             = aws_iam_role.lambda_http_departures.arn
-  handler          = "http_departures.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-http-departures"
+  role                           = aws_iam_role.lambda_http_departures.arn
+  handler                        = "http_departures.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 100
+
+  environment {
+    variables = {
+      CACHE_TABLE = aws_dynamodb_table.departures_cache.name
+    }
+  }
 }
 
 resource "aws_cloudwatch_log_group" "http_departures" {
   name              = "/aws/lambda/${aws_lambda_function.http_departures.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── HTTP VEHICLES LAMBDA ─────────────────────────────────────────────────────
@@ -342,20 +395,32 @@ resource "aws_iam_role_policy" "lambda_http_vehicles_logs" {
   policy = data.aws_iam_policy_document.logs.json
 }
 
+resource "aws_iam_role_policy" "lambda_http_vehicles_cache" {
+  role   = aws_iam_role.lambda_http_vehicles.id
+  policy = data.aws_iam_policy_document.s3_vehicles_cache_rw.json
+}
+
 resource "aws_lambda_function" "http_vehicles" {
-  function_name    = "${var.app_name}-http-vehicles"
-  role             = aws_iam_role.lambda_http_vehicles.arn
-  handler          = "http_vehicles.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-http-vehicles"
+  role                           = aws_iam_role.lambda_http_vehicles.arn
+  handler                        = "http_vehicles.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 100
+
+  environment {
+    variables = {
+      CACHE_BUCKET = aws_s3_bucket.ops.id
+    }
+  }
 }
 
 resource "aws_cloudwatch_log_group" "http_vehicles" {
   name              = "/aws/lambda/${aws_lambda_function.http_vehicles.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # ─── HTTP JOURNEY LAMBDA ──────────────────────────────────────────────────────
@@ -371,19 +436,60 @@ resource "aws_iam_role_policy" "lambda_http_journey_logs" {
 }
 
 resource "aws_lambda_function" "http_journey" {
-  function_name    = "${var.app_name}-http-journey"
-  role             = aws_iam_role.lambda_http_journey.arn
-  handler          = "http_journey.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory
+  function_name                  = "${var.app_name}-http-journey"
+  role                           = aws_iam_role.lambda_http_journey.arn
+  handler                        = "http_journey.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 20
 }
 
 resource "aws_cloudwatch_log_group" "http_journey" {
   name              = "/aws/lambda/${aws_lambda_function.http_journey.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
+}
+
+# ─── HTTP TRIP LAMBDA ────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "lambda_http_trip" {
+  name               = "${var.app_name}-lambda-http-trip"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "lambda_http_trip_logs" {
+  role   = aws_iam_role.lambda_http_trip.id
+  policy = data.aws_iam_policy_document.logs.json
+}
+
+resource "aws_iam_role_policy" "lambda_http_trip_s3" {
+  role   = aws_iam_role.lambda_http_trip.id
+  policy = data.aws_iam_policy_document.s3_trips_ro.json
+}
+
+resource "aws_lambda_function" "http_trip" {
+  function_name                  = "${var.app_name}-http-trip"
+  role                           = aws_iam_role.lambda_http_trip.arn
+  handler                        = "http_trip.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.lambda_timeout
+  memory_size                    = var.lambda_memory
+  reserved_concurrent_executions = 50
+
+  environment {
+    variables = {
+      STOPS_BUCKET = aws_s3_bucket.ops.id
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "http_trip" {
+  name              = "/aws/lambda/${aws_lambda_function.http_trip.function_name}"
+  retention_in_days = 30
 }
 
 # ─── REFRESH STOPS LAMBDA ─────────────────────────────────────────────────────
@@ -404,14 +510,15 @@ resource "aws_iam_role_policy" "lambda_refresh_stops_s3" {
 }
 
 resource "aws_lambda_function" "refresh_stops" {
-  function_name    = "${var.app_name}-refresh-stops"
-  role             = aws_iam_role.lambda_refresh_stops.arn
-  handler          = "refresh_stops.handler"
-  runtime          = "nodejs20.x"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = var.refresh_stops_timeout
-  memory_size      = 512 # needs more memory for 37MB zip decompression
+  function_name                  = "${var.app_name}-refresh-stops"
+  role                           = aws_iam_role.lambda_refresh_stops.arn
+  handler                        = "refresh_stops.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = var.refresh_stops_timeout
+  memory_size                    = 3072 # needs memory for KV7 (37MB) + openov-nl (224MB) zips + streaming stop_times
+  reserved_concurrent_executions = 2
 
   environment {
     variables = {
@@ -422,7 +529,7 @@ resource "aws_lambda_function" "refresh_stops" {
 
 resource "aws_cloudwatch_log_group" "refresh_stops" {
   name              = "/aws/lambda/${aws_lambda_function.refresh_stops.function_name}"
-  retention_in_days = 7
+  retention_in_days = 30
 }
 
 # EventBridge rule: run refresh_stops daily at 03:00 UTC
