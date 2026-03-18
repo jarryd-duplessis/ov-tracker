@@ -34,7 +34,9 @@ function parsePasstime(passtime, stopCode) {
   const {
     LinePublicNumber, DestinationName50,
     ExpectedArrivalTime, TargetArrivalTime,
-    RealtimeArrival, JourneyNumber, TransportType, OperatorCode
+    RealtimeArrival, JourneyNumber, TransportType, OperatorCode,
+    ExpectedDepartureTime, TargetDepartureTime,
+    TripStopStatus,
   } = passtime;
 
   const expectedTime = ExpectedArrivalTime || TargetArrivalTime;
@@ -46,11 +48,33 @@ function parsePasstime(passtime, stopCode) {
   const minutesUntil = Math.round((arrival - new Date()) / 60000);
   const isRealtime = !!RealtimeArrival;
 
+  // Use departure time for minutesUntil (more relevant for passengers waiting)
+  const depTime = ExpectedDepartureTime || TargetDepartureTime;
+  const departure = depTime ? parseAmsterdamTime(depTime) : null;
+  const scheduledDep = TargetDepartureTime ? parseAmsterdamTime(TargetDepartureTime) : null;
+  const minutesUntilDep = departure ? Math.round((departure - new Date()) / 60000) : minutesUntil;
+
+  // Compute delay: difference between expected and scheduled departure
+  let delay = 0;
+  if (departure && scheduledDep) {
+    delay = Math.round((departure - scheduledDep) / 60000);
+  }
+
+  // Vehicle status from KV6 events
+  // DRIVING = en route to this stop, ARRIVED = at the stop, DEPARTED = left,
+  // PLANNED = no real-time data yet, UNKNOWN = no recent updates
+  const status = TripStopStatus || 'UNKNOWN';
+  const hasRealtimeData = status === 'DRIVING' || status === 'ARRIVED' || status === 'DEPARTED';
+
   return {
     stopCode, line: LinePublicNumber, destination: DestinationName50,
-    expectedTime, scheduledTime: TargetArrivalTime, minutesUntil, isRealtime,
+    expectedTime, scheduledTime: TargetArrivalTime, minutesUntil: minutesUntilDep,
+    isRealtime: isRealtime || hasRealtimeData,
     journeyNumber: JourneyNumber, transportType: TransportType,
-    operator: OperatorCode, confidence: isRealtime ? 'live' : 'scheduled'
+    operator: OperatorCode,
+    confidence: hasRealtimeData ? 'live' : isRealtime ? 'live' : 'scheduled',
+    delay, // minutes: 0 = on time, >0 = late, <0 = early
+    status, // DRIVING, ARRIVED, DEPARTED, PLANNED, UNKNOWN
   };
 }
 

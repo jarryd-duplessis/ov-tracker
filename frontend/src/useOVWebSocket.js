@@ -4,7 +4,7 @@ const POLL_INTERVAL = 15000;
 
 // Replaces the WebSocket push model (which caused a Lambda→SQS recursive loop)
 // with direct HTTP polling of /api/departures. Same interface, no backend loop.
-export function useOVWebSocket() {
+export function useOVWebSocket({ paused = false } = {}) {
   const [departures, setDepartures] = useState([]);
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
@@ -13,8 +13,10 @@ export function useOVWebSocket() {
   const currentStops = useRef([]);
   const intervalRef = useRef(null);
   const debounceRef = useRef(null);
+  const pausedRef = useRef(paused);
 
   const fetchDepartures = useCallback(async () => {
+    if (pausedRef.current) return;
     const stops = currentStops.current;
     if (stops.length === 0) return;
     // Only pass KV7 stop codes (8+ digits) — openov-nl IDs return 404 from OVapi
@@ -34,10 +36,26 @@ export function useOVWebSocket() {
     }
   }, []);
 
+  // Keep pausedRef in sync and pause/resume polling when paused changes
+  useEffect(() => {
+    const wasPaused = pausedRef.current;
+    pausedRef.current = paused;
+    if (paused) {
+      // Pause: clear any running intervals/debounces
+      clearTimeout(debounceRef.current);
+      clearInterval(intervalRef.current);
+    } else if (wasPaused && currentStops.current.length > 0) {
+      // Resume: fetch immediately and restart interval
+      fetchDepartures();
+      intervalRef.current = setInterval(fetchDepartures, POLL_INTERVAL);
+    }
+  }, [paused, fetchDepartures]);
+
   const subscribe = useCallback((stopCodes, { immediate = false } = {}) => {
     currentStops.current = stopCodes;
     clearTimeout(debounceRef.current);
     clearInterval(intervalRef.current);
+    if (pausedRef.current) return; // Don't start polling while paused
     if (immediate) {
       // User explicitly selected a stop — clear stale departures and fetch now
       setDepartures([]);

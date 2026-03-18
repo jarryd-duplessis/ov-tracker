@@ -55,13 +55,15 @@ async function buildTripIndex() {
   const sName = stopsHeaders.indexOf('stop_name');
   const sLat = stopsHeaders.indexOf('stop_lat');
   const sLon = stopsHeaders.indexOf('stop_lon');
+  const sPlatform = stopsHeaders.indexOf('platform_code');
   for (let i = 1; i < stopsLines.length; i++) {
     if (!stopsLines[i].trim()) continue;
     const cols = parseCsvLine(stopsLines[i]);
     const lat = parseFloat(cols[sLat]);
     const lon = parseFloat(cols[sLon]);
     if (isNaN(lat) || isNaN(lon)) continue;
-    stops[cols[sId]] = { name: (cols[sName] || '').trim(), lat, lon };
+    const pc = sPlatform >= 0 ? (cols[sPlatform] || '').trim() : '';
+    stops[cols[sId]] = { name: (cols[sName] || '').trim(), lat, lon, ...(pc && { platformCode: pc }) };
   }
   console.log(`[trips] Parsed ${Object.keys(stops).length} stops`);
 
@@ -79,7 +81,7 @@ async function buildTripIndex() {
   }
   console.log(`[trips] Parsed ${Object.keys(kv7Routes).length} routes`);
 
-  // Parse trips.txt → { tripId: { headsign, routeId } }
+  // Parse trips.txt → { tripId: { headsign, routeId, shapeId } }
   const tripsText = await zip.file('trips.txt').async('string');
   const trips = {};
   const tripsLines = tripsText.trim().split('\n');
@@ -87,12 +89,50 @@ async function buildTripIndex() {
   const tId = tripsHeaders.indexOf('trip_id');
   const tHead = tripsHeaders.indexOf('trip_headsign');
   const tRoute = tripsHeaders.indexOf('route_id');
+  const tShape = tripsHeaders.indexOf('shape_id');
   for (let i = 1; i < tripsLines.length; i++) {
     if (!tripsLines[i].trim()) continue;
     const cols = parseCsvLine(tripsLines[i]);
-    trips[cols[tId]] = { headsign: (cols[tHead] || '').trim(), routeId: cols[tRoute] || '' };
+    trips[cols[tId]] = {
+      headsign: (cols[tHead] || '').trim(),
+      routeId: cols[tRoute] || '',
+      shapeId: tShape >= 0 ? (cols[tShape] || '').trim() : '',
+    };
   }
   console.log(`[trips] Parsed ${Object.keys(trips).length} trips`);
+
+  // Parse shapes.txt → { shapeId: [[lon,lat], ...] }
+  const shapes = {};
+  const shapesFile = zip.file('shapes.txt');
+  if (shapesFile) {
+    const shapesText = await shapesFile.async('string');
+    const shapesLines = shapesText.trim().split('\n');
+    const shapesHeaders = parseCsvLine(shapesLines[0]).map(h => h.trim());
+    const shId = shapesHeaders.indexOf('shape_id');
+    const shLat = shapesHeaders.indexOf('shape_pt_lat');
+    const shLon = shapesHeaders.indexOf('shape_pt_lon');
+    const shSeq = shapesHeaders.indexOf('shape_pt_sequence');
+
+    const shapePoints = {}; // shapeId → [{seq, lat, lon}, ...]
+    for (let i = 1; i < shapesLines.length; i++) {
+      if (!shapesLines[i].trim()) continue;
+      const cols = parseCsvLine(shapesLines[i]);
+      const id = cols[shId];
+      const lat = parseFloat(cols[shLat]);
+      const lon = parseFloat(cols[shLon]);
+      if (!id || isNaN(lat) || isNaN(lon)) continue;
+      if (!shapePoints[id]) shapePoints[id] = [];
+      shapePoints[id].push({ seq: parseInt(cols[shSeq]), lat, lon });
+    }
+
+    for (const [id, pts] of Object.entries(shapePoints)) {
+      pts.sort((a, b) => a.seq - b.seq);
+      shapes[id] = pts.map(p => [p.lon, p.lat]); // [lon, lat] for GeoJSON
+    }
+    console.log(`[trips] Parsed ${Object.keys(shapes).length} shapes`);
+  } else {
+    console.log('[trips] No shapes.txt found in KV7 GTFS');
+  }
 
   // Parse stop_times.txt → group by tripId
   const stText = await zip.file('stop_times.txt').async('string');
@@ -125,7 +165,7 @@ async function buildTripIndex() {
 
     if (!routes[routeKey]) routes[routeKey] = {};
     if (!routes[routeKey][journeyNum]) {
-      routes[routeKey][journeyNum] = { headsign: tripMeta.headsign, stops: [] };
+      routes[routeKey][journeyNum] = { headsign: tripMeta.headsign, stops: [], shapeId: tripMeta.shapeId || '' };
     }
     routes[routeKey][journeyNum].stops.push({
       seq: parseInt(cols[stSeq]),
@@ -134,6 +174,7 @@ async function buildTripIndex() {
       name: stop.name,
       lat: stop.lat,
       lon: stop.lon,
+      ...(stop.platformCode && { platform: stop.platformCode }),
     });
   }
 
@@ -158,13 +199,35 @@ async function buildTripIndex() {
     }
   }
 
-  // Sort stops and upload per-route files to S3
+  // Sort stops, resolve shapes, and upload per-route files to S3
   let uploaded = 0;
   const uploadPromises = [];
   for (const [routeKey, journeys] of Object.entries(routes)) {
+    // Collect unique shapes for this route (deduplicate across journeys)
+    const routeShapes = {};
+    let shapeIdx = 0;
+    const shapeIdToRef = {}; // shapeId → "s0", "s1", ...
+
     for (const jn of Object.keys(journeys)) {
       journeys[jn].stops.sort((a, b) => a.seq - b.seq);
+      const sid = journeys[jn].shapeId;
+      if (sid && shapes[sid] && !shapeIdToRef[sid]) {
+        const ref = `s${shapeIdx++}`;
+        shapeIdToRef[sid] = ref;
+        routeShapes[ref] = shapes[sid];
+      }
+      // Replace shapeId with shapeRef for output
+      if (sid && shapeIdToRef[sid]) {
+        journeys[jn].shapeRef = shapeIdToRef[sid];
+      }
+      delete journeys[jn].shapeId;
     }
+
+    // Attach deduplicated shapes to the route file
+    if (Object.keys(routeShapes).length > 0) {
+      journeys._shapes = routeShapes;
+    }
+
     const key = `trips/${routeKey.replace('|', '_')}.json`;
     uploadPromises.push(
       s3.send(new PutObjectCommand({
@@ -242,13 +305,15 @@ async function buildOpenOvTripIndex() {
   const sName = stopsHeaders.indexOf('stop_name');
   const sLat = stopsHeaders.indexOf('stop_lat');
   const sLon = stopsHeaders.indexOf('stop_lon');
+  const sPlatform = stopsHeaders.indexOf('platform_code');
   for (let i = 1; i < stopsLines.length; i++) {
     if (!stopsLines[i].trim()) continue;
     const cols = parseCsvLine(stopsLines[i]);
     const lat = parseFloat(cols[sLat]);
     const lon = parseFloat(cols[sLon]);
     if (isNaN(lat) || isNaN(lon)) continue;
-    stops[cols[sId]] = { name: (cols[sName] || '').trim(), lat, lon };
+    const pc = sPlatform >= 0 ? (cols[sPlatform] || '').trim() : '';
+    stops[cols[sId]] = { name: (cols[sName] || '').trim(), lat, lon, ...(pc && { platformCode: pc }) };
   }
   console.log(`[openov] Parsed ${Object.keys(stops).length} stops`);
 
@@ -260,11 +325,11 @@ async function buildOpenOvTripIndex() {
   const tId = tripsHeaders.indexOf('trip_id');
   const tRtId = tripsHeaders.indexOf('realtime_trip_id');
   const tHead = tripsHeaders.indexOf('trip_headsign');
+  const tShape = tripsHeaders.indexOf('shape_id');
 
-  // tripId → { routeKey, journeyNum, headsign }
-  // routeKey → first tripId seen (representative trip)
+  // tripId → { routeKey, journeyNum, headsign, shapeId }
   const tripMeta = {};
-  const representativeTrip = {}; // routeKey → tripId (first one wins)
+  const routeKeys = new Set(); // all unique route keys
   for (let i = 1; i < tripsLines.length; i++) {
     if (!tripsLines[i].trim()) continue;
     const cols = parseCsvLine(tripsLines[i]);
@@ -279,41 +344,132 @@ async function buildOpenOvTripIndex() {
     const journeyNum = parts.slice(2).join(':'); // in case journeyNum has colons
     const routeKey = `${operator}_${route}`;
     const headsign = (cols[tHead] || '').trim();
+    const shapeId = tShape >= 0 ? (cols[tShape] || '').trim() : '';
 
-    tripMeta[tripId] = { routeKey, journeyNum, headsign };
-
-    if (!representativeTrip[routeKey]) {
-      representativeTrip[routeKey] = tripId;
-    }
+    tripMeta[tripId] = { routeKey, journeyNum, headsign, shapeId };
+    routeKeys.add(routeKey);
   }
-  console.log(`[openov] Parsed ${Object.keys(tripMeta).length} trips, ${Object.keys(representativeTrip).length} routes`);
+  console.log(`[openov] Parsed ${Object.keys(tripMeta).length} trips, ${routeKeys.size} routes`);
 
-  // Determine which routes to skip (already covered by KV7)
-  const routesToBuild = new Set();
-  for (const routeKey of Object.keys(representativeTrip)) {
-    if (!existingRoutes.has(routeKey)) {
-      routesToBuild.add(routeKey);
-    }
-  }
-  console.log(`[openov] ${routesToBuild.size} new routes to build (${Object.keys(representativeTrip).length - routesToBuild.size} already covered by KV7)`);
+  // openov-nl has COMPLETE stop lists + shapes for all routes.
+  // KV7 only has timing stops (tijdstiphaltes) — typically 3-5 per route vs 30+.
+  // So we always rebuild from openov-nl, replacing any KV7 data.
+  const routesToBuild = routeKeys;
+  const replacingKv7 = [...routesToBuild].filter(r => existingRoutes.has(r)).length;
+  console.log(`[openov] Building ${routesToBuild.size} routes (${replacingKv7} replacing KV7 timing-stop-only data, ${routesToBuild.size - replacingKv7} new)`);
 
   if (routesToBuild.size === 0) {
-    console.log('[openov] No new routes to build, done');
+    console.log('[openov] No routes to build, done');
     return;
   }
 
-  // Build set of representative trip IDs we need stop_times for
+  // Build set of ALL trip IDs we need stop_times for (all journeys on routes we're building)
   const neededTripIds = new Set();
-  for (const routeKey of routesToBuild) {
-    neededTripIds.add(representativeTrip[routeKey]);
+  for (const [tripId, meta] of Object.entries(tripMeta)) {
+    if (routesToBuild.has(meta.routeKey)) {
+      neededTripIds.add(tripId);
+    }
+  }
+  console.log(`[openov] Need stop_times for ${neededTripIds.size} trips across ${routesToBuild.size} routes`);
+
+  // Collect shape IDs we need
+  const neededShapeIds = new Set();
+  for (const tripId of neededTripIds) {
+    const meta = tripMeta[tripId];
+    if (meta?.shapeId) neededShapeIds.add(meta.shapeId);
   }
 
-  // Free tripsText memory
-  // (tripsLines and tripsText are no longer needed)
+  // 4b. Stream-parse shapes.txt
+  const shapes = {};
+  const shapesFile = zip.file('shapes.txt');
+  if (shapesFile && neededShapeIds.size > 0) {
+    console.log(`[openov] Parsing shapes.txt for ${neededShapeIds.size} shapes...`);
+    const shapePoints = {};
+    const shStream = shapesFile.nodeStream('nodebuffer');
+    const shRl = createInterface({ input: shStream, crlfDelay: Infinity });
+    let shHeadersParsed = false;
+    let shId, shLat, shLon, shSeq;
 
-  // 5. Stream-parse stop_times.txt — only keep entries for representative trips
-  // routes: routeKey → { journeyNum → { headsign, stops[] } }
+    for await (const line of shRl) {
+      if (!line.trim()) continue;
+      if (!shHeadersParsed) {
+        const headers = parseCsvLine(line).map(h => h.trim());
+        shId = headers.indexOf('shape_id');
+        shLat = headers.indexOf('shape_pt_lat');
+        shLon = headers.indexOf('shape_pt_lon');
+        shSeq = headers.indexOf('shape_pt_sequence');
+        shHeadersParsed = true;
+        continue;
+      }
+      const cols = parseCsvLine(line);
+      const id = cols[shId];
+      if (!neededShapeIds.has(id)) continue;
+      const lat = parseFloat(cols[shLat]);
+      const lon = parseFloat(cols[shLon]);
+      if (isNaN(lat) || isNaN(lon)) continue;
+      if (!shapePoints[id]) shapePoints[id] = [];
+      shapePoints[id].push({ seq: parseInt(cols[shSeq]), lat, lon });
+    }
+
+    for (const [id, pts] of Object.entries(shapePoints)) {
+      pts.sort((a, b) => a.seq - b.seq);
+      shapes[id] = pts.map(p => [p.lon, p.lat]);
+    }
+    console.log(`[openov] Parsed ${Object.keys(shapes).length} shapes`);
+  }
+
+  // 5. Stream-parse stop_times.txt — keep entries for ALL trips on routes we need
+  // To avoid OOM with 875K+ trips, we process in chunks: accumulate stop_times,
+  // and periodically flush completed routes to S3.
   const routes = {};
+  let routesInMemory = 0;
+  const FLUSH_THRESHOLD = 200; // flush after accumulating this many routes
+
+  // Helper: flush accumulated routes to S3
+  async function flushRoutes() {
+    const uploadPromises = [];
+    for (const [routeKey, journeys] of Object.entries(routes)) {
+      const routeShapes = {};
+      let shapeIdx = 0;
+      const shapeIdToRef = {};
+
+      for (const jn of Object.keys(journeys)) {
+        journeys[jn].stops.sort((a, b) => a.seq - b.seq);
+        const sid = journeys[jn].shapeId;
+        if (sid && shapes[sid] && !shapeIdToRef[sid]) {
+          const ref = `s${shapeIdx++}`;
+          shapeIdToRef[sid] = ref;
+          routeShapes[ref] = shapes[sid];
+        }
+        if (sid && shapeIdToRef[sid]) {
+          journeys[jn].shapeRef = shapeIdToRef[sid];
+        }
+        delete journeys[jn].shapeId;
+      }
+
+      if (Object.keys(routeShapes).length > 0) {
+        journeys._shapes = routeShapes;
+      }
+
+      const key = `trips/${routeKey}.json`;
+      uploadPromises.push(
+        s3.send(new PutObjectCommand({
+          Bucket: BUCKET, Key: key,
+          Body: JSON.stringify(journeys),
+          ContentType: 'application/json',
+        }))
+      );
+      if (uploadPromises.length >= 50) {
+        await Promise.all(uploadPromises.splice(0));
+      }
+    }
+    await Promise.all(uploadPromises);
+    const count = Object.keys(routes).length;
+    // Clear memory
+    for (const k of Object.keys(routes)) delete routes[k];
+    routesInMemory = 0;
+    return count;
+  }
 
   const stFile = zip.file('stop_times.txt');
   const stStream = stFile.nodeStream('nodebuffer');
@@ -321,6 +477,7 @@ async function buildOpenOvTripIndex() {
 
   let headersParsed = false;
   let stTrip, stArr, stDep, stStop, stSeq;
+  let totalUploaded = 0;
 
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -339,7 +496,6 @@ async function buildOpenOvTripIndex() {
     const cols = parseCsvLine(line);
     const tripId = cols[stTrip];
 
-    // Only process representative trips for routes we need
     if (!neededTripIds.has(tripId)) continue;
 
     const meta = tripMeta[tripId];
@@ -351,9 +507,12 @@ async function buildOpenOvTripIndex() {
 
     const { routeKey, journeyNum, headsign } = meta;
 
-    if (!routes[routeKey]) routes[routeKey] = {};
+    if (!routes[routeKey]) {
+      routes[routeKey] = {};
+      routesInMemory++;
+    }
     if (!routes[routeKey][journeyNum]) {
-      routes[routeKey][journeyNum] = { headsign, stops: [] };
+      routes[routeKey][journeyNum] = { headsign, stops: [], shapeId: meta.shapeId || '' };
     }
     routes[routeKey][journeyNum].stops.push({
       seq: parseInt(cols[stSeq]),
@@ -362,31 +521,21 @@ async function buildOpenOvTripIndex() {
       name: stop.name,
       lat: stop.lat,
       lon: stop.lon,
+      ...(stop.platformCode && { platform: stop.platformCode }),
     });
+
+    // Flush to S3 periodically to avoid OOM
+    if (routesInMemory >= FLUSH_THRESHOLD) {
+      const flushed = await flushRoutes();
+      totalUploaded += flushed;
+      console.log(`[openov] Flushed ${flushed} routes to S3 (${totalUploaded} total so far)`);
+    }
   }
 
-  // 6. Sort stops and upload per-route files to S3
-  let uploaded = 0;
-  const uploadPromises = [];
-  for (const [routeKey, journeys] of Object.entries(routes)) {
-    for (const jn of Object.keys(journeys)) {
-      journeys[jn].stops.sort((a, b) => a.seq - b.seq);
-    }
-    const key = `trips/${routeKey}.json`;
-    uploadPromises.push(
-      s3.send(new PutObjectCommand({
-        Bucket: BUCKET,
-        Key: key,
-        Body: JSON.stringify(journeys),
-        ContentType: 'application/json',
-      })).then(() => { uploaded++; })
-    );
-    if (uploadPromises.length >= 50) {
-      await Promise.all(uploadPromises.splice(0));
-    }
-  }
-  await Promise.all(uploadPromises);
-  console.log(`[openov] Uploaded ${uploaded} route trip files to S3`);
+  // 6. Flush remaining routes to S3
+  const remaining = await flushRoutes();
+  totalUploaded += remaining;
+  console.log(`[openov] Uploaded ${totalUploaded} route trip files to S3 (final flush: ${remaining})`);
 }
 
 // ── Lookup a single trip (called from http_trip Lambda) ─────────────────
@@ -429,21 +578,31 @@ async function fetchRouteData(operator, routeCode) {
 
 function findJourney(data, journeyNum) {
   if (!data) return null;
+  let journey = null;
   // Exact match
-  if (data[journeyNum]) return data[journeyNum];
-  // Fuzzy match: find the closest journey number
-  const target = parseInt(journeyNum);
-  if (isNaN(target)) return null;
-  let bestKey = null, bestDist = Infinity;
-  for (const key of Object.keys(data)) {
-    const dist = Math.abs(parseInt(key) - target);
-    if (dist < bestDist) { bestDist = dist; bestKey = key; }
+  if (data[journeyNum]) {
+    journey = data[journeyNum];
+  } else {
+    // Fuzzy match: find the closest journey number
+    const target = parseInt(journeyNum);
+    if (isNaN(target)) return null;
+    let bestKey = null, bestDist = Infinity;
+    for (const key of Object.keys(data)) {
+      if (key === '_shapes') continue; // skip shapes dict
+      const dist = Math.abs(parseInt(key) - target);
+      if (dist < bestDist) { bestDist = dist; bestKey = key; }
+    }
+    // Accept fuzzy match if within 5 of the target
+    if (bestKey && bestDist <= 5) journey = data[bestKey];
+    // Otherwise return any trip on this route (same stops, different times)
+    else if (bestKey) journey = data[bestKey];
   }
-  // Accept fuzzy match if within 5 of the target
-  if (bestKey && bestDist <= 5) return data[bestKey];
-  // Otherwise return any trip on this route (same stops, different times)
-  if (bestKey) return data[bestKey];
-  return null;
+  if (!journey) return null;
+  // Resolve shape from _shapes if present
+  if (journey.shapeRef && data._shapes && data._shapes[journey.shapeRef]) {
+    journey.shape = data._shapes[journey.shapeRef];
+  }
+  return journey;
 }
 
 async function getTripStops(operator, route, journeyNum, line) {

@@ -28,10 +28,9 @@ exports.handler = async (event) => {
   try {
     const trip = await getTripStops(operator, route, journeyNum, line);
     if (!trip) {
-      // Return 200 with error body — CloudFront's custom_error_response intercepts 404s
-      // and serves index.html (SPA fallback), so we must avoid non-2xx status codes.
       return { statusCode: 200, headers: CORS, body: JSON.stringify({ error: 'Trip not found' }) };
     }
+
     return {
       statusCode: 200,
       headers: CORS,
@@ -39,6 +38,7 @@ exports.handler = async (event) => {
         operator, route, journeyNum,
         headsign: trip.headsign,
         stops: trip.stops,
+        shape: trip.shape || null,
       }),
     };
   } catch (e) {

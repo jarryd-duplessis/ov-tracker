@@ -70,12 +70,12 @@ function haversineM(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Tier 1: per-container in-memory cache (5s) — avoids S3 latency for warm containers
+// Tier 1: per-container in-memory cache (3s) — avoids S3 latency for warm containers
 let vehicleCache = { vehicles: [], fetchedAt: 0 };
-const MEM_TTL = 5000;
+const MEM_TTL = 3000;
 
-// Tier 2: S3 shared cache (5s) — one OVapi call per 5s across all containers
-const S3_TTL = 5000;
+// Tier 2: S3 shared cache (3s) — one OVapi call per 3s across all containers
+const S3_TTL = 3000;
 
 // Returns { vehicles, fetchedAt } — fetchedAt is the ms timestamp of the actual fetch,
 // so the caller can echo it back to the client for cache-age debugging.
@@ -121,7 +121,6 @@ async function getVehiclePositions() {
 
   const vehicles = [];
   const newPrevPositions = {};
-  const now = Date.now();
 
   for (const entity of feed.entity) {
     const vp = entity.vehicle;

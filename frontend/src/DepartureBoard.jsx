@@ -10,14 +10,8 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
   const colour = TYPE_COLOUR[dep.transportType] || '#888';
   const icon = TYPE_ICON[dep.transportType] || '🚌';
   const isLive = dep.confidence === 'live';
-
-  // Compute delay
-  const delay = (() => {
-    if (!dep.expectedTime || !dep.scheduledTime) return 0;
-    const exp = new Date(dep.expectedTime).getTime();
-    const sched = new Date(dep.scheduledTime).getTime();
-    return Math.round((exp - sched) / 60000);
-  })();
+  const delay = dep.delay || 0;
+  const status = dep.status || 'UNKNOWN';
 
   return (
     <div style={{
@@ -58,25 +52,39 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
             display: 'flex', alignItems: 'center', gap: 6, marginTop: 3,
             fontSize: 11, color: 'var(--text-muted)',
           }}>
-            {/* Live/scheduled dot */}
-            <span style={{
-              display: 'inline-flex', alignItems: 'center', gap: 3,
-              color: isLive ? 'var(--green)' : 'var(--text-muted)',
-              fontWeight: isLive ? 600 : 400,
-            }}>
+            {/* Status indicator */}
+            {status === 'DRIVING' && (
               <span style={{
-                width: 5, height: 5, borderRadius: '50%',
-                background: isLive ? 'var(--green)' : 'var(--text-muted)',
-                display: 'inline-block',
-                animation: isLive ? 'pulse 1.5s infinite' : 'none',
-                opacity: isLive ? 1 : 0.5,
-              }} />
-              {isLive ? 'live' : 'sched'}
-            </span>
-            {/* Delay indicator */}
-            {delay > 0 && (
-              <span style={{ color: 'var(--orange)', fontWeight: 600 }}>
-                +{delay}'
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                color: delay > 2 ? 'var(--orange)' : 'var(--green)', fontWeight: 600,
+              }}>
+                <span style={{
+                  width: 5, height: 5, borderRadius: '50%',
+                  background: delay > 2 ? 'var(--orange)' : 'var(--green)',
+                  display: 'inline-block', animation: 'pulse 1.5s infinite',
+                }} />
+                {delay > 2 ? `+${delay}'` : delay < -1 ? `${delay}'` : 'on time'}
+              </span>
+            )}
+            {status === 'ARRIVED' && (
+              <span style={{ color: 'var(--green)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
+                at stop
+              </span>
+            )}
+            {status === 'DEPARTED' && (
+              <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>departed</span>
+            )}
+            {(status === 'PLANNED' || status === 'UNKNOWN') && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                color: 'var(--text-muted)', fontWeight: 400,
+              }}>
+                <span style={{
+                  width: 5, height: 5, borderRadius: '50%',
+                  background: 'var(--text-muted)', display: 'inline-block', opacity: 0.5,
+                }} />
+                {delay > 2 ? `sched +${delay}'` : 'sched'}
               </span>
             )}
             {/* Scheduled time */}
@@ -141,7 +149,7 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
               background: 'var(--accent)', display: 'inline-block',
               animation: 'pulse 1.5s infinite',
             }} />
-            Route on map
+            Full route on map
           </div>
           <button
             onClick={e => { e.stopPropagation(); onTrack(null); }}
@@ -152,7 +160,7 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
               fontSize: 11, cursor: 'pointer', fontWeight: 600,
             }}
           >
-            Stop
+            Hide route
           </button>
         </div>
       )}
@@ -160,21 +168,27 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
   );
 }
 
-export default function DepartureBoard({ departures, nearbyStops, selectedStop, lastUpdate, loading, connected, trackedId, savedIds, onTrack, onToggleSave, onStopClick }) {
+export default function DepartureBoard({ departures, nearbyStops, selectedStop, departureStop, lastUpdate, loading, connected, trackedId, savedIds, onTrack, onToggleSave, onStopClick }) {
   const [filter, setFilter] = useState('ALL');
   const types = useMemo(() => ['ALL', ...new Set(departures.map(d => d.transportType))], [departures]);
 
+  // Reset filter when stop changes or when the selected filter type is no longer available
+  useEffect(() => { setFilter('ALL'); }, [selectedStop]);
   useEffect(() => {
     if (filter !== 'ALL' && !types.includes(filter)) setFilter('ALL');
   }, [filter, types]);
 
   const filtered = departures.filter(d => filter === 'ALL' || d.transportType === filter);
 
-  const stopName = selectedStop
-    ? nearbyStops.find(s => s.tpc === selectedStop)?.name || 'Selected stop'
-    : nearbyStops.length > 0
-      ? `${nearbyStops.length} stop${nearbyStops.length > 1 ? 's' : ''} nearby`
-      : 'Locating stops...';
+  // Show the clicked/selected stop name as the header
+  const selectedName = selectedStop
+    ? nearbyStops.find(s => s.tpc === selectedStop)?.name
+    : null;
+  const depStopName = departureStop?.name;
+  const showingDifferentStop = departureStop && departureStop.tpc !== selectedStop && depStopName;
+  const stopName = selectedName || depStopName || (nearbyStops.length > 0
+    ? `${nearbyStops.length} stop${nearbyStops.length > 1 ? 's' : ''} nearby`
+    : 'Locating stops...');
 
   return (
     <div style={{
@@ -192,6 +206,11 @@ export default function DepartureBoard({ departures, nearbyStops, selectedStop, 
             <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>
               {stopName}
             </div>
+            {showingDifferentStop && (
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                Departures from {depStopName}
+              </div>
+            )}
             {lastUpdate && (
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, fontVariantNumeric: 'tabular-nums' }}>
                 {lastUpdate.toLocaleTimeString('nl-NL')}

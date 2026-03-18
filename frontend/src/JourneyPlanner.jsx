@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-function PlaceInput({ value, onChange, placeholder, icon }) {
+function PlaceInput({ value, onChange, onPickCoords, placeholder, icon }) {
   const [query, setQuery] = useState(value);
   const [suggestions, setSuggestions] = useState([]);
   const [active, setActive] = useState(-1);
@@ -15,25 +15,44 @@ function PlaceInput({ value, onChange, placeholder, icon }) {
     if (q.trim().length < 2) { setSuggestions([]); setOpen(false); return; }
     debounceRef.current = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({
-          q, format: 'json', limit: 5, countrycodes: 'nl',
-          addressdetails: 1, 'accept-language': 'nl',
-        });
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-          headers: { 'Accept-Language': 'nl' },
-        });
-        const data = await res.json();
-        setSuggestions(data);
-        setOpen(data.length > 0);
+        // Search transit stops AND Nominatim in parallel
+        const [stopsRes, nominatimRes] = await Promise.all([
+          fetch(`/api/stops/nearby?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => ({ stops: [] })),
+          fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({
+            q, format: 'json', limit: 5, countrycodes: 'nl',
+            addressdetails: 1, 'accept-language': 'nl',
+          })}`, { headers: { 'Accept-Language': 'nl' } }).then(r => r.json()).catch(() => []),
+        ]);
+
+        // Transit stops first (with _isStop marker), then Nominatim results
+        const stopSuggestions = (stopsRes.stops || []).slice(0, 5).map(s => ({
+          _isStop: true,
+          display_name: s.name,
+          lat: s.lat,
+          lon: s.lon,
+          tpc: s.tpc,
+        }));
+        const combined = [...stopSuggestions, ...nominatimRes.slice(0, 3)];
+        setSuggestions(combined);
+        setOpen(combined.length > 0);
         setActive(-1);
-      } catch (e) { console.warn('Nominatim error:', e); }
+      } catch (e) { console.warn('Search error:', e); }
     }, 280);
   }, []);
 
   const pick = (s) => {
-    const label = s.display_name.split(',').slice(0, 2).join(',').trim();
-    setQuery(label);
-    onChange(label);
+    if (s._isStop) {
+      // Transit stop — use exact coordinates
+      setQuery(s.display_name);
+      onChange(s.display_name);
+      onPickCoords?.({ lat: s.lat, lon: s.lon });
+    } else {
+      // Nominatim result — use geocoded location
+      const label = s.display_name.split(',').slice(0, 2).join(',').trim();
+      setQuery(label);
+      onChange(label);
+      onPickCoords?.({ lat: parseFloat(s.lat), lon: parseFloat(s.lon) });
+    }
     setSuggestions([]);
     setOpen(false);
   };
@@ -96,12 +115,11 @@ function PlaceInput({ value, onChange, placeholder, icon }) {
           animation: 'fadeIn 0.15s ease',
         }}>
           {suggestions.map((s, i) => {
-            const parts = s.display_name.split(',');
-            const main = parts.slice(0, 2).join(',').trim();
-            const sub = parts.slice(2, 4).join(',').trim();
+            const main = s._isStop ? s.display_name : s.display_name.split(',').slice(0, 2).join(',').trim();
+            const sub = s._isStop ? null : s.display_name.split(',').slice(2, 4).join(',').trim();
             return (
               <div
-                key={s.place_id}
+                key={s._isStop ? `stop-${s.tpc}-${i}` : s.place_id}
                 onMouseDown={() => pick(s)}
                 onMouseEnter={() => setActive(i)}
                 style={{
@@ -110,8 +128,12 @@ function PlaceInput({ value, onChange, placeholder, icon }) {
                   borderBottom: i < suggestions.length - 1 ? '1px solid var(--border)' : 'none',
                 }}
               >
-                <div style={{ color: 'var(--text)', fontWeight: 500 }}>{main}</div>
+                <div style={{ color: 'var(--text)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {s._isStop && <span style={{ fontSize: 11, opacity: 0.7 }}>🚏</span>}
+                  {main}
+                </div>
                 {sub && <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 1 }}>{sub}</div>}
+                {s._isStop && <div style={{ color: 'var(--accent)', fontSize: 10, marginTop: 1, fontWeight: 600 }}>Transit stop</div>}
               </div>
             );
           })}
@@ -444,6 +466,7 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [fromCoords, setFromCoords] = useState(null);
+  const [toCoords, setToCoords] = useState(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -459,6 +482,11 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
     setFromCoords(null);
   }, []);
 
+  const handleToChange = useCallback((val) => {
+    setTo(val);
+    setToCoords(null);
+  }, []);
+
   const useMyLocation = useCallback(() => {
     if (!userLocation) return;
     setFrom('My location');
@@ -467,12 +495,11 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
 
   // Swap from/to
   const handleSwap = useCallback(() => {
-    setFrom(prev => {
-      setTo(from);
-      return to;
-    });
-    setFromCoords(null);
-  }, [from, to]);
+    setFrom(to);
+    setTo(from);
+    setFromCoords(toCoords);
+    setToCoords(fromCoords);
+  }, [from, to, fromCoords, toCoords]);
 
   const search = async () => {
     if ((!from.trim() && !fromCoords) || !to.trim()) return;
@@ -484,13 +511,20 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
       const [h, m] = time.split(':');
       const dt = new Date();
       dt.setHours(parseInt(h), parseInt(m), 0, 0);
-      const params = new URLSearchParams({ to, time: dt.toISOString() });
+      const params = new URLSearchParams({ time: dt.toISOString() });
       if (fromCoords) {
         params.set('fromLat', fromCoords.lat);
         params.set('fromLon', fromCoords.lon);
-        params.set('from', 'My location');
+        params.set('from', from || 'My location');
       } else {
         params.set('from', from);
+      }
+      if (toCoords) {
+        params.set('toLat', toCoords.lat);
+        params.set('toLon', toCoords.lon);
+        params.set('to', to);
+      } else {
+        params.set('to', to);
       }
       if (arriveBy) params.set('arriveBy', 'true');
       const res = await fetch(`/api/journey?${params}`);
@@ -515,7 +549,7 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {/* From row */}
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <PlaceInput value={from} onChange={handleFromChange} placeholder="From" icon="from" />
+            <PlaceInput value={from} onChange={handleFromChange} onPickCoords={setFromCoords} placeholder="From" icon="from" />
             {userLocation && (
               <button
                 onClick={useMyLocation}
@@ -557,7 +591,7 @@ export default function JourneyPlanner({ onSelectJourney, userLocation }) {
           </div>
 
           {/* To row */}
-          <PlaceInput value={to} onChange={setTo} placeholder="To" icon="to" />
+          <PlaceInput value={to} onChange={handleToChange} onPickCoords={setToCoords} placeholder="To" icon="to" />
 
           <TimePicker time={time} setTime={setTime} arriveBy={arriveBy} setArriveBy={setArriveBy} />
 

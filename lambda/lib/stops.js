@@ -205,4 +205,48 @@ async function findNearbyStops(lat, lon, maxResults = 30, maxDistanceKm = 1.0) {
   return kept.slice(0, maxResults);
 }
 
-module.exports = { findNearbyStops, getStops, downloadStops, saveToS3 };
+async function searchStopsByName(query, maxResults = 8) {
+  const stops = await getStops();
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+
+  const results = [];
+  for (const stop of stops) {
+    const name = stop.name.toLowerCase();
+    if (name.includes(q)) {
+      results.push(stop);
+    }
+  }
+
+  // Score: prefer exact word matches, shorter names, and names starting with the query
+  const words = q.split(/[\s,]+/);
+  results.sort((a, b) => {
+    const aName = a.name.toLowerCase();
+    const bName = b.name.toLowerCase();
+    // Exact match on the stop part (after comma) gets highest priority
+    const aPart = aName.split(',').pop().trim();
+    const bPart = bName.split(',').pop().trim();
+    const aExact = aPart === q ? 0 : aPart.startsWith(q) ? 1 : 2;
+    const bExact = bPart === q ? 0 : bPart.startsWith(q) ? 1 : 2;
+    if (aExact !== bExact) return aExact - bExact;
+    // All query words present in name
+    const aAllWords = words.every(w => aName.includes(w)) ? 0 : 1;
+    const bAllWords = words.every(w => bName.includes(w)) ? 0 : 1;
+    if (aAllWords !== bAllWords) return aAllWords - bAllWords;
+    // Shorter names first (more specific)
+    return aName.length - bName.length;
+  });
+
+  // Deduplicate by name+proximity (same stop on opposite sides of road)
+  const kept = [];
+  for (const stop of results) {
+    const dupe = kept.some(k =>
+      k.name === stop.name && haversineDistance(stop.lat, stop.lon, k.lat, k.lon) < 0.05
+    );
+    if (!dupe) kept.push(stop);
+    if (kept.length >= maxResults) break;
+  }
+  return kept;
+}
+
+module.exports = { findNearbyStops, searchStopsByName, getStops, downloadStops, saveToS3 };

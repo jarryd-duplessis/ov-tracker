@@ -157,14 +157,29 @@ export default function TripPanel({ vehicle, onClose }) {
                       display: 'flex', justifyContent: 'space-between',
                       alignItems: 'baseline', gap: 6,
                     }}>
-                      <span style={{
-                        fontSize: isFirst || isLast ? 12 : 11,
-                        fontWeight: isFirst || isLast ? 700 : 400,
-                        color: isFirst || isLast ? 'var(--text)' : 'var(--text-secondary)',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      <div style={{
+                        display: 'flex', alignItems: 'baseline', gap: 4,
+                        minWidth: 0, overflow: 'hidden',
                       }}>
-                        {stop.name}
-                      </span>
+                        <span style={{
+                          fontSize: isFirst || isLast ? 12 : 11,
+                          fontWeight: isFirst || isLast ? 700 : 400,
+                          color: isFirst || isLast ? 'var(--text)' : 'var(--text-secondary)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {stop.name}
+                        </span>
+                        {stop.platform && (
+                          <span style={{
+                            fontSize: 9, color: 'var(--text-muted)', fontWeight: 600,
+                            background: 'var(--bg-surface)', padding: '1px 4px',
+                            borderRadius: 3, border: '1px solid var(--border)',
+                            flexShrink: 0, whiteSpace: 'nowrap',
+                          }}>
+                            P{stop.platform}
+                          </span>
+                        )}
+                      </div>
                       <span style={{
                         fontSize: 11, flexShrink: 0,
                         fontWeight: isFirst || isLast ? 600 : 400,

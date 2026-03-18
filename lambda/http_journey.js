@@ -17,7 +17,11 @@ async function geocode(query) {
     const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'KomtIe/1.0 (live-ov-tracker)' } });
     if (!res.ok) throw new Error(`Geocoding failed: ${res.status}`);
     const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) throw new Error(`Location not found: "${query}"`);
+    if (!Array.isArray(data) || data.length === 0) {
+      const err = new Error(`Location not found: "${query}"`);
+      err.statusCode = 400;
+      throw err;
+    }
     return {
       lat: parseFloat(data[0].lat),
       lon: parseFloat(data[0].lon),
@@ -29,18 +33,20 @@ async function geocode(query) {
 }
 
 exports.handler = async (event) => {
-  const { from, to, fromLat, fromLon, time, arriveBy } = event.queryStringParameters || {};
-  if ((!from && (!fromLat || !fromLon)) || !to) {
-    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'from (or fromLat+fromLon) and to are required' }) };
+  const { from, to, fromLat, fromLon, toLat, toLon, time, arriveBy } = event.queryStringParameters || {};
+  if ((!from && (!fromLat || !fromLon)) || (!to && (!toLat || !toLon))) {
+    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'from (or fromLat+fromLon) and to (or toLat+toLon) are required' }) };
   }
 
   try {
-    // Use exact coordinates when provided (e.g. tracking a departure from a known stop)
+    // Use exact coordinates when provided (e.g. from transit stop search)
     const [fromGeo, toGeo] = await Promise.all([
       (fromLat && fromLon)
         ? Promise.resolve({ lat: parseFloat(fromLat), lon: parseFloat(fromLon), name: from || 'Boarding stop' })
         : geocode(from),
-      geocode(to),
+      (toLat && toLon)
+        ? Promise.resolve({ lat: parseFloat(toLat), lon: parseFloat(toLon), name: to || 'Destination' })
+        : geocode(to),
     ]);
     let motisUrl = `https://europe.motis-project.de/api/v1/plan?fromPlace=${fromGeo.lat},${fromGeo.lon}&toPlace=${toGeo.lat},${toGeo.lon}&numItineraries=5&showIntermediateStops=true`;
     if (time) motisUrl += `&time=${encodeURIComponent(time)}`;
@@ -65,6 +71,6 @@ exports.handler = async (event) => {
     };
   } catch (e) {
     console.error('Journey error:', e);
-    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: e.message }) };
+    return { statusCode: e.statusCode || 500, headers: CORS, body: JSON.stringify({ error: e.message }) };
   }
 };
