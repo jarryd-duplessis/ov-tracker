@@ -35,6 +35,8 @@
   --radius-md:     10px;
   --radius-lg:     14px;
   --radius-full:   9999px;
+  --overlay-bg:    rgba(15,17,23,0.85);
+  --overlay-border:#242840;
   color-scheme: dark;
 }
 
@@ -64,6 +66,8 @@
   --shadow-sm:     0 1px 2px rgba(0,0,0,0.06);
   --shadow-md:     0 4px 12px rgba(0,0,0,0.08);
   --shadow-lg:     0 8px 24px rgba(0,0,0,0.12);
+  --overlay-bg:    rgba(255,255,255,0.9);
+  --overlay-border:#d1d5db;
   color-scheme: light;
 }
 

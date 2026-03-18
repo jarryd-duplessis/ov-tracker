@@ -170,6 +170,12 @@ resource "aws_apigatewayv2_route" "http_vehicles" {
   target    = "integrations/${aws_apigatewayv2_integration.http_vehicles.id}"
 }
 
+resource "aws_apigatewayv2_route" "http_vehicles_by_id" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "GET /api/vehicles/{id}"
+  target    = "integrations/${aws_apigatewayv2_integration.http_vehicles.id}"
+}
+
 resource "aws_lambda_permission" "http_vehicles" {
   statement_id  = "AllowHTTPAPIVehicles"
   action        = "lambda:InvokeFunction"

@@ -110,14 +110,25 @@ export default function App() {
   const [savedTrips, setSavedTrips] = useState(loadSavedTrips);
   const [selectedVehicle, setSelectedVehicle] = useState(null);
   const [theme, setTheme] = useState(loadTheme);
+  const [appVisible, setAppVisible] = useState(!document.hidden);
   const watchIdRef = useRef(null);
   const lastStopFetchRef = useRef(null);
   const userSelectedStopRef = useRef(false);
   const nearbyStopsRef = useRef(nearbyStops);
   useEffect(() => { nearbyStopsRef.current = nearbyStops; }, [nearbyStops]);
+  const allStopsRef = useRef([]); // Full stop list (not sliced) for KV7 lookup
+  const [departureStop, setDepartureStop] = useState(null); // KV7 stop departures come from (may differ from selectedStop)
+  const trackedDepartureRef = useRef(null);
   const routeEpochRef = useRef(0);
 
-  const { departures, connected, lastUpdate, error: wsError, subscribe } = useOVWebSocket();
+  // Pause all polling when the tab is hidden (Page Visibility API)
+  useEffect(() => {
+    const handleVisibility = () => setAppVisible(!document.hidden);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+
+  const { departures, connected, lastUpdate, error: wsError, subscribe } = useOVWebSocket({ paused: !appVisible });
 
   const savedIds = useMemo(() => new Set(savedTrips.map(t => t.id)), [savedTrips]);
 
@@ -150,13 +161,19 @@ export default function App() {
       if (!res.ok) throw new Error(`Stops fetch failed: ${res.status}`);
       const data = await res.json();
       if (data.stops && data.stops.length > 0) {
-        const stops = data.stops.slice(0, 8);
+        const allStops = data.stops;
+        allStopsRef.current = allStops;
+        const stops = allStops.slice(0, 8);
         setNearbyStops(stops);
-        if (!userSelectedStopRef.current) {
-          const closestKv7 = stops.find(s => s.tpc && s.tpc.length >= 8);
-          if (closestKv7) {
-            setSelectedStop(closestKv7.tpc);
-            subscribe([closestKv7.tpc], { immediate: true });
+        if (!userSelectedStopRef.current && !trackedDepartureRef.current) {
+          // Highlight the nearest stop (first in distance-sorted list)
+          setSelectedStop(stops[0].tpc);
+          // Subscribe to the nearest KV7 stop (≥8 digit TPC) for departures —
+          // only KV7 stops return data from OVapi.
+          const nearestKv7 = allStops.find(s => s.tpc && s.tpc.length >= 8);
+          if (nearestKv7) {
+            setDepartureStop(nearestKv7);
+            subscribe([nearestKv7.tpc], { immediate: true });
           }
         }
       }
@@ -216,10 +233,33 @@ export default function App() {
     }
   }, []);
 
+  // Find nearest KV7 stop from a list
+  const findNearestKv7 = useCallback((lat, lon, stops) => {
+    let best = null, bestDist = Infinity;
+    for (const s of stops) {
+      if (!s.tpc || s.tpc.length < 8) continue;
+      const d = Math.hypot((s.lat - lat) * 111, (s.lon - lon) * 68);
+      if (d < bestDist) { best = s; bestDist = d; }
+    }
+    return best;
+  }, []);
+
+  // Subscribe to a KV7 stop for departures
+  const subscribeTo = useCallback((kv7Stop) => {
+    if (kv7Stop) {
+      setDepartureStop(kv7Stop);
+      subscribe([kv7Stop.tpc], { immediate: true });
+    } else {
+      setDepartureStop(null);
+      subscribe([], { immediate: true });
+    }
+  }, [subscribe]);
+
   // Stop click
   const handleStopClick = useCallback((stop) => {
     routeEpochRef.current++;
     userSelectedStopRef.current = true;
+    trackedDepartureRef.current = null;
     setSelectedStop(stop.tpc);
     setSelectedVehicle(null);
     setTrackedDeparture(null);
@@ -227,53 +267,125 @@ export default function App() {
     setMode('nearby');
     setMapCenter({ lat: stop.lat, lon: stop.lon, t: Date.now() });
 
-    let subscribeTpc = stop.tpc;
-    if (!subscribeTpc || subscribeTpc.length < 8) {
-      const nearby = nearbyStopsRef.current;
-      let best = null, bestDist = Infinity;
-      for (const s of nearby) {
-        if (!s.tpc || s.tpc.length < 8) continue;
-        const d = Math.hypot((s.lat - stop.lat) * 111, (s.lon - stop.lon) * 68);
-        if (d < bestDist) { best = s; bestDist = d; }
-      }
-      subscribeTpc = best?.tpc;
+    // 8-digit TPC — subscribe directly
+    if (stop.tpc && stop.tpc.length >= 8) {
+      subscribeTo(stop);
+      return;
     }
-    if (subscribeTpc) subscribe([subscribeTpc], { immediate: true });
-  }, [subscribe]);
+
+    // 7-digit TPC — always fetch stops near the clicked location to find KV7 stops.
+    // allStopsRef may be centered elsewhere and miss KV7 stops near this stop.
+    fetch(`${API_BASE}/stops/nearby?lat=${stop.lat}&lon=${stop.lon}&radius=1.5`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.stops) return;
+        allStopsRef.current = data.stops;
+        subscribeTo(findNearestKv7(stop.lat, stop.lon, data.stops));
+      })
+      .catch(() => subscribeTo(null));
+  }, [subscribe, findNearestKv7, subscribeTo]);
 
   // Tracking
   const handleTrack = useCallback((dep) => {
+    trackedDepartureRef.current = dep;
     setTrackedDeparture(dep);
     if (dep) setMode('nearby');
   }, []);
 
   const handleVehicleSelect = useCallback((vehicle) => {
     routeEpochRef.current++;
+    trackedDepartureRef.current = null;
     setSelectedVehicle(vehicle);
     setJourneyRoute(null);
     setTrackedDeparture(null);
   }, []);
 
-  // Auto-fetch route for tracked departure
+  // Fetch and draw route shape for tracked departure using the trip API.
+  // We find the matching vehicle from the live feed to get the correct GTFS-RT
+  // operator/route codes (OVapi uses different operator codes than GTFS-RT).
   useEffect(() => {
     if (!trackedDeparture) { setJourneyRoute(null); return; }
-    const stop = nearbyStopsRef.current.find(s => s.tpc === trackedDeparture.stopCode);
-    if (!stop) return;
     const epoch = routeEpochRef.current;
     const controller = new AbortController();
-    fetch(
-      `/api/journey?fromLat=${stop.lat}&fromLon=${stop.lon}&to=${encodeURIComponent(trackedDeparture.destination)}`,
-      { signal: controller.signal }
-    )
-      .then(r => r.json())
-      .then(data => {
+
+    (async () => {
+      try {
+        // Find the matching vehicle in the live feed by journey number + line + proximity
+        const vRes = await fetch('/api/vehicles', { signal: controller.signal });
+        const vData = vRes.ok ? await vRes.json() : { vehicles: [] };
+        const jn = String(trackedDeparture.journeyNumber);
+        // Get the departure stop's coordinates for proximity filtering
+        const depStop = allStopsRef.current.find(s => s.tpc === trackedDeparture.stopCode)
+          || nearbyStopsRef.current.find(s => s.tpc === trackedDeparture.stopCode);
+        const depLat = depStop?.lat;
+        const depLon = depStop?.lon;
+
+        // Find nearest vehicle: exact journey match first, then any same-line vehicle nearby
+        const findNearest = (list) => {
+          if (list.length === 0) return null;
+          if (list.length === 1 || depLat == null) return list[0];
+          return list.reduce((best, v) => {
+            const dB = Math.hypot((best.lat - depLat) * 111, (best.lon - depLon) * 68);
+            const dV = Math.hypot((v.lat - depLat) * 111, (v.lon - depLon) * 68);
+            return dV < dB ? v : best;
+          });
+        };
+        const rejectFar = (v) => {
+          if (!v || depLat == null) return v;
+          return Math.hypot((v.lat - depLat) * 111, (v.lon - depLon) * 68) <= 30 ? v : null;
+        };
+
+        // 1. Try exact journey number match
+        let vehicle = rejectFar(findNearest(
+          (vData.vehicles || []).filter(v =>
+            v.id.endsWith(`:${jn}`) && (!trackedDeparture.line || v.line === trackedDeparture.line)
+          )
+        ));
+
+        // 2. Fallback: any vehicle on the same line nearby (route shape is the same)
+        if (!vehicle && trackedDeparture.line) {
+          vehicle = rejectFar(findNearest(
+            (vData.vehicles || []).filter(v => v.line === trackedDeparture.line)
+          ));
+        }
         if (routeEpochRef.current !== epoch) return;
-        const it = data.itineraries?.find(it =>
-          it.legs.some(l => l.mode !== 'WALK' && l.routeShortName === trackedDeparture.line)
-        ) ?? data.itineraries?.[0] ?? null;
-        setJourneyRoute(it);
-      })
-      .catch(e => { if (e.name !== 'AbortError') console.warn('Route fetch failed:', e); });
+
+        // Fetch trip data from the matched vehicle
+        let tData = null;
+        if (vehicle) {
+          const params = new URLSearchParams({ vehicleId: vehicle.id });
+          if (vehicle.line) params.set('line', vehicle.line);
+          const tRes = await fetch(`/api/trip?${params}`, { signal: controller.signal });
+          tData = await tRes.json();
+        }
+        if (routeEpochRef.current !== epoch) return;
+        if (!tData || tData.error || !tData.stops || tData.stops.length < 2) return;
+
+        const coords = tData.shape && tData.shape.length >= 2
+          ? tData.shape
+          : tData.stops.map(s => [s.lon, s.lat]);
+        const colour = trackedDeparture.transportType === 'TRAM' ? '#FF9800'
+          : trackedDeparture.transportType === 'METRO' ? '#2196F3' : '#4CAF50';
+        const isExactVehicle = vehicle && vehicle.id.endsWith(`:${jn}`);
+        setJourneyRoute({
+          _rawCoords: coords,
+          _colour: colour,
+          _stops: tData.stops,
+          _headsign: tData.headsign,
+          _vehicleId: vehicle?.id || null, // for highlighting the vehicle on the map
+          _isExactVehicle: isExactVehicle, // only show progress line for exact match
+          _journeyNum: jn, // for matching the exact vehicle if it appears later
+          _line: trackedDeparture.line,
+          _departureStopCode: trackedDeparture.stopCode,
+          _delay: trackedDeparture.delay || 0,
+          _status: trackedDeparture.status || 'UNKNOWN',
+          legs: [],
+        });
+      } catch (e) {
+        if (e.name !== 'AbortError') console.warn('Trip route fetch failed:', e);
+      }
+    })();
+
     return () => controller.abort();
   }, [trackedDeparture]);
 
@@ -309,13 +421,14 @@ export default function App() {
   const sidebarContent = (
     <>
       {selectedVehicle && (
-        <TripPanel vehicle={selectedVehicle} onClose={() => setSelectedVehicle(null)} />
+        <TripPanel vehicle={selectedVehicle} onClose={() => handleVehicleSelect(null)} />
       )}
       {!selectedVehicle && mode === 'nearby' && (
         <DepartureBoard
           departures={departures}
           nearbyStops={nearbyStops}
           selectedStop={selectedStop}
+          departureStop={departureStop}
           lastUpdate={lastUpdate}
           loading={loadingStops}
           connected={connected}
@@ -353,7 +466,15 @@ export default function App() {
         ['journey', 'Plan'],
         ['saved', activeSavedCount > 0 ? `Saved (${activeSavedCount})` : 'Saved'],
       ].map(([m, label]) => (
-        <button key={m} onClick={() => setMode(m)} style={{
+        <button key={m} onClick={() => {
+          setMode(m);
+          // Clear route/tracking when switching away from the current context
+          if (m !== mode) {
+            trackedDepartureRef.current = null;
+            setJourneyRoute(null);
+            setTrackedDeparture(null);
+          }
+        }} style={{
           padding: isMobile ? '7px 14px' : '6px 16px',
           borderRadius: 'var(--radius-md)',
           border: 'none',
@@ -440,16 +561,18 @@ export default function App() {
             nearbyStops={nearbyStops}
             selectedStop={selectedStop}
             departures={departures}
-            onMapMove={({ lat, lon, radius }) => {
-              userSelectedStopRef.current = false;
+            onMapMove={({ lat, lon, radius, isPan }) => {
+              if (isPan) userSelectedStopRef.current = false;
               fetchNearbyStops(lat, lon, radius);
             }}
             onFollowVehicle={({ lat, lon }) => fetchNearbyStops(lat, lon, 0.4)}
             onStopClick={handleStopClick}
             onVehicleSelect={handleVehicleSelect}
+            selectedVehicle={selectedVehicle}
             centerOn={mapCenter}
             journeyRoute={journeyRoute}
             trackedDeparture={trackedDeparture}
+            appVisible={appVisible}
           />
           <BottomSheet
             peekContent={
@@ -555,16 +678,18 @@ export default function App() {
             nearbyStops={nearbyStops}
             selectedStop={selectedStop}
             departures={departures}
-            onMapMove={({ lat, lon, radius }) => {
-              userSelectedStopRef.current = false;
+            onMapMove={({ lat, lon, radius, isPan }) => {
+              if (isPan) userSelectedStopRef.current = false;
               fetchNearbyStops(lat, lon, radius);
             }}
             onFollowVehicle={({ lat, lon }) => fetchNearbyStops(lat, lon, 0.4)}
             onStopClick={handleStopClick}
             onVehicleSelect={handleVehicleSelect}
+            selectedVehicle={selectedVehicle}
             centerOn={mapCenter}
             journeyRoute={journeyRoute}
             trackedDeparture={trackedDeparture}
+            appVisible={appVisible}
           />
         </div>
         <div style={{

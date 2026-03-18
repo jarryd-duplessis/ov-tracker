@@ -104,7 +104,11 @@ data "aws_iam_policy_document" "departures_cache_rw" {
 data "aws_iam_policy_document" "s3_vehicles_cache_rw" {
   statement {
     actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.ops.arn}/vehicles_cache.json"]
+    resources = [
+      "${aws_s3_bucket.ops.arn}/vehicles_cache.json",
+      "${aws_s3_bucket.ops.arn}/tiles/*",
+      "${aws_s3_bucket.ops.arn}/events/*",
+    ]
   }
 }
 
@@ -551,4 +555,68 @@ resource "aws_lambda_permission" "refresh_stops_eventbridge" {
   function_name = aws_lambda_function.refresh_stops.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.refresh_stops.arn
+}
+
+# ─── VEHICLE INGESTION PIPELINE ──────────────────────────────────────────────
+# Runs every minute via EventBridge. Internally loops at 5s intervals.
+# Fetches GTFS-RT, computes bearing/speed/confidence, writes geographic tiles
+# to S3, and persists raw events for analytics.
+
+resource "aws_iam_role" "lambda_ingest_vehicles" {
+  name               = "${var.app_name}-lambda-ingest-vehicles"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "lambda_ingest_vehicles_logs" {
+  role   = aws_iam_role.lambda_ingest_vehicles.id
+  policy = data.aws_iam_policy_document.logs.json
+}
+
+resource "aws_iam_role_policy" "lambda_ingest_vehicles_s3" {
+  role   = aws_iam_role.lambda_ingest_vehicles.id
+  policy = data.aws_iam_policy_document.s3_vehicles_cache_rw.json
+}
+
+resource "aws_lambda_function" "ingest_vehicles" {
+  function_name                  = "${var.app_name}-ingest-vehicles"
+  role                           = aws_iam_role.lambda_ingest_vehicles.arn
+  handler                        = "ingest_vehicles.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = 65 # runs for ~55s internally, 10s buffer
+  memory_size                    = 256
+  reserved_concurrent_executions = 1 # only one instance at a time
+
+  environment {
+    variables = {
+      CACHE_BUCKET = aws_s3_bucket.ops.id
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "ingest_vehicles" {
+  name              = "/aws/lambda/${aws_lambda_function.ingest_vehicles.function_name}"
+  retention_in_days = 7
+}
+
+# EventBridge: trigger every 1 minute
+resource "aws_cloudwatch_event_rule" "ingest_vehicles" {
+  name                = "${var.app_name}-ingest-vehicles"
+  description         = "Vehicle position ingestion pipeline (runs every minute, loops at 5s)"
+  schedule_expression = "rate(1 minute)"
+}
+
+resource "aws_cloudwatch_event_target" "ingest_vehicles" {
+  rule      = aws_cloudwatch_event_rule.ingest_vehicles.name
+  target_id = "ingest-vehicles"
+  arn       = aws_lambda_function.ingest_vehicles.arn
+}
+
+resource "aws_lambda_permission" "ingest_vehicles_eventbridge" {
+  statement_id  = "AllowEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingest_vehicles.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.ingest_vehicles.arn
 }

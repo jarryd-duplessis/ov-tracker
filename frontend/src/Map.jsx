@@ -63,7 +63,10 @@ async function getRoutePath(vehicle) {
       routePathCache[key] = null;
       return null;
     }
-    const coords = data.stops.map(s => [s.lon, s.lat]);
+    // Prefer shape geometry (dense road waypoints) over stop coordinates (straight lines)
+    const coords = data.shape && data.shape.length >= 2
+      ? data.shape
+      : data.stops.map(s => [s.lon, s.lat]);
     routePathCache[key] = { coords, fetchedAt: Date.now() };
     return coords;
   } catch {
@@ -141,12 +144,15 @@ function walkAlongPath(coords, segIdx, t, dist) {
 }
 
 // Returns true if a vehicle matches the tracked departure
-function matchesTracked(vehicle, dep) {
+function matchesTracked(vehicle, dep, journeyRoute) {
   if (!dep) return false;
-  if (vehicle.tripId && dep.journeyNumber) {
-    if (vehicle.tripId.includes(String(dep.journeyNumber))) return true;
+  // Match the resolved vehicle ID (proximity-validated during route fetch)
+  if (journeyRoute?._vehicleId && vehicle.id === journeyRoute._vehicleId) return true;
+  // Also match by exact journey number + line (vehicle may have appeared after initial search)
+  if (journeyRoute?._journeyNum && journeyRoute._line) {
+    if (vehicle.id.endsWith(`:${journeyRoute._journeyNum}`) && vehicle.line === journeyRoute._line) return true;
   }
-  return false; // don't fall back to line — too broad, matches unrelated vehicles
+  return false;
 }
 
 function applyStopStyle(el, name, distanceM, isHighlighted) {
@@ -187,7 +193,7 @@ const MAP_STYLES = {
   light: 'https://tiles.openfreemap.org/styles/liberty',
 };
 
-export default function Map({ theme, userLocation, nearbyStops, selectedStop, departures, onMapMove, onFollowVehicle, onStopClick, onVehicleSelect, trackedDeparture, centerOn, journeyRoute }) {
+export default function Map({ theme, userLocation, nearbyStops, selectedStop, departures, onMapMove, onFollowVehicle, onStopClick, onVehicleSelect, selectedVehicle, trackedDeparture, centerOn, journeyRoute, appVisible = true }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const stopMarkersMapRef = useRef({}); // tpc → { marker, el } — incremental updates, no flicker
@@ -208,6 +214,38 @@ export default function Map({ theme, userLocation, nearbyStops, selectedStop, de
   const [vehicleCount, setVehicleCount] = useState(0);
   const [followedVehicle, setFollowedVehicle] = useState(null);
   const userInitiatedRef = useRef(false);
+  const [styleEpoch, setStyleEpoch] = useState(0);
+  const allVehiclesRef = useRef([]);
+
+  // ── Idle detection: pause vehicle fetch after 30s of no interaction ──
+  const IDLE_TIMEOUT = 30000;
+  const [mapIdle, setMapIdle] = useState(false);
+  const idleTimerRef = useRef(null);
+  const paused = !appVisible || mapIdle;
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+
+  // Reset idle timer on user interaction
+  useEffect(() => {
+    const container = mapContainer.current;
+    if (!container) return;
+
+    const resetIdle = () => {
+      setMapIdle(false);
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => setMapIdle(true), IDLE_TIMEOUT);
+    };
+
+    // Start the initial idle timer
+    idleTimerRef.current = setTimeout(() => setMapIdle(true), IDLE_TIMEOUT);
+
+    const events = ['mousedown', 'touchstart', 'wheel', 'mousemove', 'keydown'];
+    events.forEach(e => container.addEventListener(e, resetIdle, { passive: true }));
+    return () => {
+      clearTimeout(idleTimerRef.current);
+      events.forEach(e => container.removeEventListener(e, resetIdle));
+    };
+  }, [styleEpoch]); // re-attach after map style reload (styleEpoch changes on theme switch)
 
   // Switch map tile style when theme changes
   const themeRef = useRef(theme);
@@ -215,6 +253,8 @@ export default function Map({ theme, userLocation, nearbyStops, selectedStop, de
     if (!mapRef.current || theme === themeRef.current) return;
     themeRef.current = theme;
     mapRef.current.setStyle(MAP_STYLES[theme] || MAP_STYLES.dark);
+    // setStyle destroys all sources/layers — bump epoch so the route effect re-runs
+    mapRef.current.once('style.load', () => setStyleEpoch(e => e + 1));
   }, [theme]);
 
   // Explicit fly-to from parent (e.g. journey planner selects a boarding stop)
@@ -223,63 +263,108 @@ export default function Map({ theme, userLocation, nearbyStops, selectedStop, de
 mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.2 });
   }, [centerOn]);
 
+  // Store journeyRoute in a ref so the vehicle render loop can read it for progress updates
+  const journeyRouteRef = useRef(journeyRoute);
+  useEffect(() => { journeyRouteRef.current = journeyRoute; }, [journeyRoute]);
+
   // Draw / clear the tracked departure's route as a GeoJSON line layer
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
+    const emptyFC = { type: 'FeatureCollection', features: [] };
     const geojson = { type: 'FeatureCollection', features: [] };
-
     const walkGeojson = { type: 'FeatureCollection', features: [] };
+    const stopsGeojson = { type: 'FeatureCollection', features: [] };
+    const routeColour = journeyRoute?._colour || '#4FC3F7';
 
     if (journeyRoute) {
-      for (const leg of journeyRoute.legs) {
-        if (!leg.legGeometry?.points) {
-          // Walk legs without geometry — draw a straight line from/to
-          if (leg.mode === 'WALK' && leg.from?.lon != null && leg.to?.lon != null) {
-            walkGeojson.features.push({
+      // Trip-based route (from /api/trip) — raw coords, no encoded polyline
+      if (journeyRoute._rawCoords && journeyRoute._rawCoords.length >= 2) {
+        geojson.features.push({
+          type: 'Feature',
+          properties: { color: routeColour },
+          geometry: { type: 'LineString', coordinates: journeyRoute._rawCoords },
+        });
+
+        // Add stop markers along the route
+        if (journeyRoute._stops) {
+          const depStopCode = journeyRoute._departureStopCode;
+          journeyRoute._stops.forEach((stop, i) => {
+            const isFirst = i === 0;
+            const isLast = i === journeyRoute._stops.length - 1;
+            // Match departure stop by proximity (OVapi TPC ≠ GTFS stop_id)
+            const isUserStop = depStopCode && nearbyStopsRef.current.some(ns =>
+              ns.tpc === depStopCode &&
+              Math.abs(ns.lat - stop.lat) < 0.001 && Math.abs(ns.lon - stop.lon) < 0.001
+            );
+            stopsGeojson.features.push({
               type: 'Feature',
-              properties: {},
-              geometry: { type: 'LineString', coordinates: [[leg.from.lon, leg.from.lat], [leg.to.lon, leg.to.lat]] },
+              properties: {
+                name: stop.name,
+                isFirst, isLast, isUserStop,
+                time: stop.dep || stop.arr || '',
+                platform: stop.platform || '',
+                radius: isFirst || isLast ? 6 : isUserStop ? 7 : 4,
+                color: isUserStop ? '#FFD740' : isFirst || isLast ? routeColour : '#ffffff',
+                strokeColor: isUserStop ? '#FFD740' : routeColour,
+                strokeWidth: isFirst || isLast || isUserStop ? 3 : 2,
+              },
+              geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
             });
-          }
-          continue;
+          });
         }
-        const color = LEG_COLOUR[leg.mode] || '#4FC3F7';
-        try {
-          const coords = decodePoly(leg.legGeometry.points, leg.legGeometry.precision ?? 5);
-          if (coords.length >= 2) {
-            if (leg.mode === 'WALK') {
+      } else {
+        // Journey planner route (from Motis) — encoded polylines per leg
+        for (const leg of journeyRoute.legs) {
+          if (!leg.legGeometry?.points) {
+            if (leg.mode === 'WALK' && leg.from?.lon != null && leg.to?.lon != null) {
               walkGeojson.features.push({
-                type: 'Feature',
-                properties: {},
-                geometry: { type: 'LineString', coordinates: coords },
-              });
-            } else {
-              geojson.features.push({
-                type: 'Feature',
-                properties: { color },
-                geometry: { type: 'LineString', coordinates: coords },
+                type: 'Feature', properties: {},
+                geometry: { type: 'LineString', coordinates: [[leg.from.lon, leg.from.lat], [leg.to.lon, leg.to.lat]] },
               });
             }
+            continue;
           }
-        } catch { /* malformed polyline — skip */ }
+          const color = LEG_COLOUR[leg.mode] || '#4FC3F7';
+          try {
+            const coords = decodePoly(leg.legGeometry.points, leg.legGeometry.precision ?? 5);
+            if (coords.length >= 2) {
+              if (leg.mode === 'WALK') {
+                walkGeojson.features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+              } else {
+                geojson.features.push({ type: 'Feature', properties: { color }, geometry: { type: 'LineString', coordinates: coords } });
+              }
+            }
+          } catch { /* malformed polyline — skip */ }
+        }
       }
     }
 
     const apply = () => {
+      // Route line (dimmer — the progress overlay will be bright)
       if (map.getSource('journey-route')) {
         map.getSource('journey-route').setData(geojson);
       } else {
         map.addSource('journey-route', { type: 'geojson', data: geojson });
         const beforeLayer = map.getLayer('road-label') ? 'road-label' : undefined;
         map.addLayer({
-          id: 'journey-route-line',
-          type: 'line',
-          source: 'journey-route',
+          id: 'journey-route-line', type: 'line', source: 'journey-route',
           layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.85 },
+          paint: { 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.4 },
         }, beforeLayer);
+      }
+
+      // Vehicle progress (traveled portion) — brighter overlay
+      if (map.getSource('journey-progress')) {
+        map.getSource('journey-progress').setData(emptyFC);
+      } else {
+        map.addSource('journey-progress', { type: 'geojson', data: emptyFC });
+        map.addLayer({
+          id: 'journey-progress-line', type: 'line', source: 'journey-progress',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9 },
+        });
       }
 
       // Walk segments as dashed lines
@@ -288,15 +373,46 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
       } else {
         map.addSource('journey-walk', { type: 'geojson', data: walkGeojson });
         map.addLayer({
-          id: 'journey-walk-line',
-          type: 'line',
-          source: 'journey-walk',
+          id: 'journey-walk-line', type: 'line', source: 'journey-walk',
           layout: { 'line-cap': 'round', 'line-join': 'round' },
           paint: { 'line-color': '#888', 'line-width': 3, 'line-opacity': 0.7, 'line-dasharray': [2, 3] },
         });
       }
 
-      // Fit map to show the full route (transit + walk)
+      // Route stop circles
+      if (map.getSource('journey-stops')) {
+        map.getSource('journey-stops').setData(stopsGeojson);
+      } else {
+        map.addSource('journey-stops', { type: 'geojson', data: stopsGeojson });
+        map.addLayer({
+          id: 'journey-stops-circle', type: 'circle', source: 'journey-stops',
+          paint: {
+            'circle-radius': ['get', 'radius'],
+            'circle-color': ['get', 'color'],
+            'circle-stroke-color': ['get', 'strokeColor'],
+            'circle-stroke-width': ['get', 'strokeWidth'],
+          },
+        });
+        // Stop name labels (visible at zoom >= 14)
+        map.addLayer({
+          id: 'journey-stops-label', type: 'symbol', source: 'journey-stops',
+          minzoom: 14,
+          layout: {
+            'text-field': ['get', 'name'],
+            'text-size': 11,
+            'text-offset': [0, 1.5],
+            'text-anchor': 'top',
+            'text-max-width': 12,
+          },
+          paint: {
+            'text-color': 'var(--text, #eee)',
+            'text-halo-color': 'var(--bg, #000)',
+            'text-halo-width': 1.5,
+          },
+        });
+      }
+
+      // Fit map to show the full route
       const allFeatures = [...geojson.features, ...walkGeojson.features];
       if (allFeatures.length > 0) {
         const allCoords = allFeatures.flatMap(f => f.geometry.coordinates);
@@ -311,15 +427,27 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
       }
     };
 
-    if (map.isStyleLoaded()) apply();
-    else map.once('style.load', apply);
-  }, [journeyRoute]);
+    if (map.isStyleLoaded()) {
+      apply();
+    } else {
+      const wrappedApply = () => apply();
+      map.once('style.load', wrappedApply);
+      return () => { map.off('style.load', wrappedApply); };
+    }
+  }, [journeyRoute, styleEpoch]);
 
   // Keep refs current without triggering map re-initialisation
   useEffect(() => { onMapMoveRef.current = onMapMove; }, [onMapMove]);
   useEffect(() => { onFollowVehicleRef.current = onFollowVehicle; }, [onFollowVehicle]);
   useEffect(() => { onStopClickRef.current = onStopClick; }, [onStopClick]);
   useEffect(() => { onVehicleSelectRef.current = onVehicleSelect; }, [onVehicleSelect]);
+  // Sync followed-vehicle state when parent clears selectedVehicle (e.g. TripPanel close)
+  useEffect(() => {
+    if (!selectedVehicle && followedVehicleIdRef.current) {
+      followedVehicleIdRef.current = null;
+      setFollowedVehicle(null);
+    }
+  }, [selectedVehicle]);
   useEffect(() => { nearbyStopsRef.current = nearbyStops; }, [nearbyStops]);
   useEffect(() => {
     const prev = trackedDepartureRef.current;
@@ -374,9 +502,17 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
     // vs programmatic (flyTo, setCenter, easeTo). Only user-initiated pans
     // should re-fetch stops — programmatic movements happen when we fly to a
     // tracked departure or selected journey and must not override the subscription.
-    mapRef.current.on('movestart', (e) => { userInitiatedRef.current = !!e.originalEvent; });
+    let moveStartCenter = null;
+    mapRef.current.on('movestart', (e) => {
+      userInitiatedRef.current = !!e.originalEvent;
+      if (userInitiatedRef.current && mapRef.current) {
+        const c = mapRef.current.getCenter();
+        moveStartCenter = { lat: c.lat, lon: c.lng };
+      }
+    });
 
     // Fetch stops for whatever area the user pans to (debounced 600ms, zoom >= 13)
+    // Zoom-only interactions (center barely moves) refresh stops but keep the selection
     mapRef.current.on('moveend', () => {
       if (!userInitiatedRef.current) return; // programmatic flyTo — keep current stop subscription
       clearTimeout(moveTimerRef.current);
@@ -385,14 +521,16 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
         if (!map || !onMapMoveRef.current) return;
         if (map.getZoom() < 13) return;
         const c = map.getCenter();
+        // Detect zoom-only: center moved less than ~50m
+        const isPan = !moveStartCenter ||
+          Math.hypot((c.lat - moveStartCenter.lat) * 111000, (c.lng - moveStartCenter.lon) * 68000) > 50;
         const ne = map.getBounds().getNorthEast();
-        // Half-diagonal of viewport in km — clamp to 1.5km so we don't flood
-        // the map with hundreds of stop markers when zoomed out
         const dLat = (ne.lat - c.lat) * Math.PI / 180;
         const dLon = (ne.lng - c.lng) * Math.PI / 180;
         const a = Math.sin(dLat/2)**2 + Math.cos(c.lat*Math.PI/180)**2 * Math.sin(dLon/2)**2;
         const radius = Math.min(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)), 1.5);
-        onMapMoveRef.current({ lat: c.lat, lon: c.lng, radius });
+        // Only reset user selection on actual pans, not zoom
+        onMapMoveRef.current({ lat: c.lat, lon: c.lng, radius, isPan });
       }, 600);
     });
 
@@ -459,7 +597,7 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
 
     // Add new markers / refresh style on existing ones
     nearbyStops.forEach(stop => {
-      const isHighlighted = selectedStop === stop.tpc || trackedDepartureRef.current?.stopCode === stop.tpc;
+      const isHighlighted = selectedStop === stop.tpc;
       if (stopMarkersMapRef.current[stop.tpc]) {
         // Already on map — just refresh style (distance label may have changed)
         const el = stopMarkerElsRef.current[stop.tpc];
@@ -478,6 +616,8 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
           e.preventDefault();
           // Suppress the moveend handler so clicking a stop doesn't trigger onMapMove
           userInitiatedRef.current = false;
+          // Cancel any pending debounced onMapMove from a previous pan
+          clearTimeout(moveTimerRef.current);
           onStopClickRef.current?.(stop);
         });
 
@@ -492,7 +632,6 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
 
   // Fetch and render live vehicle positions (viewport-filtered)
   useEffect(() => {
-    const allVehiclesRef = { current: [] };
     // Persistent marker state keyed by vehicle id — survives between polls
     const stateRef = { current: {} }; // id → { marker, el, lat, lon, styleKey }
     // Single shared animation loop — avoids N concurrent rAF callbacks competing
@@ -518,8 +657,25 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
     };
     mapRef.current?.on('movestart', onMoveStart);
 
-    const INTERP_MS = 1500; // interpolation duration to new GPS position
-    const DR_MAX_MS = 15000; // max dead reckoning time after interpolation ends
+    const INTERP_MS = 4000; // interpolation duration to new GPS position (matches ~5s data refresh)
+    const DR_MAX_MS = 20000; // max dead reckoning time after interpolation ends
+    const DEFAULT_SPEED = 8; // ~30 km/h fallback when speed is 0 but vehicle was moving
+
+    // Snap a lat/lon to the nearest point on the route path
+    function snapToPath(rawLon, rawLat, path) {
+      const pos = findOnPath(rawLon, rawLat, path);
+      // Reconstruct the snapped point from the segment
+      const a = path[pos.segIdx];
+      const b = path[pos.segIdx + 1];
+      return {
+        lon: a[0] + pos.t * (b[0] - a[0]),
+        lat: a[1] + pos.t * (b[1] - a[1]),
+        bearing: Math.atan2(b[0] - a[0], b[1] - a[1]) * 180 / Math.PI,
+        segIdx: pos.segIdx,
+        t: pos.t,
+        distAlong: pos.distAlong,
+      };
+    }
 
     function startLoop() {
       if (rafId !== null) return;
@@ -534,33 +690,47 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
 
           let lat, lon;
           if (elapsed < INTERP_MS) {
-            // Phase 1: smooth interpolation to the GPS position
+            // Phase 1: smooth interpolation to the GPS position (ease-in-out)
             const raw = elapsed / INTERP_MS;
-            const t = raw < 0.5 ? 2 * raw * raw : -1 + (4 - 2 * raw) * raw;
+            const t = raw * raw * (3 - 2 * raw); // smoothstep — no abrupt start/stop
+
+            // Linear interpolation first
             lon = a.fromLon + (a.toLon - a.fromLon) * t;
             lat = a.fromLat + (a.toLat - a.fromLat) * t;
+
+            // Snap the interpolated position to the route shape
+            if (a.routePath && a.routePath.length >= 2) {
+              const snapped = snapToPath(lon, lat, a.routePath);
+              lon = snapped.lon;
+              lat = snapped.lat;
+              if (snapped.bearing != null) {
+                updateBearing(s.el, snapped.bearing);
+              }
+            }
             active = true;
-          } else if (a.speed > 0.5 && elapsed < INTERP_MS + DR_MAX_MS) {
-            // Phase 2: dead reckoning along route path (or straight-line fallback)
+          } else if (elapsed < INTERP_MS + DR_MAX_MS) {
+            // Phase 2: dead reckoning along route path
+            // Use actual speed, or estimate from the distance moved during interpolation
+            const drSpeed = a.speed > 0.5 ? a.speed
+              : (a.routePath ? DEFAULT_SPEED : 0); // only DR with fallback speed if we have a route
+            if (drSpeed < 0.1) { delete anims[id]; continue; }
             const drSec = (elapsed - INTERP_MS) / 1000;
-            // Distance in degrees (approximate) — speed is m/s, 1° ≈ 111111m
-            const distDeg = (a.speed * drSec) / 111111;
+            // Gradually slow down dead reckoning over time to avoid overshooting
+            const slowdown = Math.max(0.3, 1 - drSec / (DR_MAX_MS / 1000));
+            const distDeg = (drSpeed * slowdown * drSec) / 111111;
 
             if (a.routePath && a.routePath.length >= 2) {
-              // Route-snapped: find where the GPS position sits on the path, then walk forward
-              if (!a._pathPos) {
-                a._pathPos = findOnPath(a.toLon, a.toLat, a.routePath);
+              if (!a._toPathPos) {
+                a._toPathPos = findOnPath(a.toLon, a.toLat, a.routePath);
               }
-              const result = walkAlongPath(a.routePath, a._pathPos.segIdx, a._pathPos.t, distDeg);
+              const result = walkAlongPath(a.routePath, a._toPathPos.segIdx, a._toPathPos.t, distDeg);
               lon = result.lon;
               lat = result.lat;
-              // Update bearing to follow the route direction
               if (result.bearing != null) {
                 a.bearing = result.bearing;
                 updateBearing(s.el, result.bearing);
               }
             } else if (a.bearing != null) {
-              // Straight-line fallback when no route path available
               const bearRad = a.bearing * Math.PI / 180;
               const cosLat = Math.cos(a.toLat * Math.PI / 180);
               lat = a.toLat + (a.speed * Math.cos(bearRad) * drSec) / 111111;
@@ -571,7 +741,6 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
             }
             active = true;
           } else {
-            // Done — vehicle is stationary or dead reckoning expired
             delete anims[id];
             continue;
           }
@@ -658,7 +827,7 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
       let trackedVehicle = null;
 
       for (const v of visibleVehicles) {
-        const isTracked = matchesTracked(v, tracked);
+        const isTracked = matchesTracked(v, tracked, journeyRouteRef.current);
         const isFollowed = v.id === followedId;
         if (isTracked) trackedVehicle = v;
 
@@ -676,25 +845,28 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
           }
 
           if (s.lat !== v.lat || s.lon !== v.lon) {
-            // Hand off to the shared loop — interpolate to new GPS position,
-            // then dead-reckon along route path until the next update
+            // Use the marker's CURRENT screen position as the start point,
+            // not the previous GPS position — avoids jump-back when dead reckoning
+            // has moved the marker ahead of the last known GPS position.
+            const currentLngLat = s.marker.getLngLat();
+            const routePath = routePathsRef.current[v.id] || null;
+
             const anim = {
-              fromLat: s.lat, fromLon: s.lon,
+              fromLat: currentLngLat.lat, fromLon: currentLngLat.lng,
               toLat: v.lat, toLon: v.lon,
               speed: v.speed || 0, bearing: v.bearing,
               startTime: performance.now(),
-              routePath: routePathsRef.current[v.id] || null,
+              routePath,
             };
             animsRef.current[v.id] = anim;
 
             // Fetch route path if we don't have one yet (non-blocking)
-            if (!anim.routePath && !routePathFetchingRef.current.has(v.id)) {
+            if (!routePath && !routePathFetchingRef.current.has(v.id)) {
               routePathFetchingRef.current.add(v.id);
               getRoutePath(v).then(coords => {
                 routePathFetchingRef.current.delete(v.id);
                 if (coords) {
                   routePathsRef.current[v.id] = coords;
-                  // Attach to current animation if it's still running
                   const currentAnim = animsRef.current[v.id];
                   if (currentAnim && !currentAnim.routePath) {
                     currentAnim.routePath = coords;
@@ -735,10 +907,90 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
 
       // (Camera no longer follows vehicles — just highlights them in place)
 
-      if (trackedVehicle && lastTrackedIdRef.current === null) {
-        const tid = `${tracked.stopCode}-${tracked.journeyNumber}`;
-        lastTrackedIdRef.current = tid;
-        map.flyTo({ center: [trackedVehicle.lon, trackedVehicle.lat], zoom: 15, speed: 1.5 });
+      // Note: camera is handled by the route drawing effect's fitBounds,
+      // not by flying to the vehicle position (which could be wrong or far away)
+
+      // Update vehicle progress line (traveled portion of the route)
+      const jr = journeyRouteRef.current;
+      if (jr?._rawCoords && jr._rawCoords.length >= 2 && map.getSource('journey-progress')) {
+        let traveled = null;
+
+        if (trackedVehicle && (jr._isExactVehicle || trackedVehicle.id.endsWith(`:${jr._journeyNum}`))) {
+          // GPS-based progress: project the exact vehicle's position onto the route
+          const pos = findOnPath(trackedVehicle.lon, trackedVehicle.lat, jr._rawCoords);
+          traveled = jr._rawCoords.slice(0, pos.segIdx + 1);
+          const a = jr._rawCoords[pos.segIdx];
+          const b = jr._rawCoords[pos.segIdx + 1];
+          if (a && b) {
+            traveled.push([a[0] + pos.t * (b[0] - a[0]), a[1] + pos.t * (b[1] - a[1])]);
+          }
+        } else if (jr._stops && jr._stops.length >= 2) {
+          // Schedule-based progress: estimate position from timetable
+          const now = new Date();
+          const h = now.getHours(), m = now.getMinutes();
+          const nowMins = h * 60 + m;
+          // Parse stop times (HH:MM:SS format) and find where we are in the schedule
+          let lastPassedStop = -1;
+          let fraction = 0;
+          for (let i = 0; i < jr._stops.length; i++) {
+            const timeStr = jr._stops[i].dep || jr._stops[i].arr;
+            if (!timeStr) continue;
+            const parts = timeStr.split(':');
+            const stopMins = parseInt(parts[0]) * 60 + parseInt(parts[1]) + (jr._delay || 0);
+            if (nowMins >= stopMins) {
+              lastPassedStop = i;
+              // Compute fraction to next stop
+              if (i < jr._stops.length - 1) {
+                const nextTimeStr = jr._stops[i + 1].dep || jr._stops[i + 1].arr;
+                if (nextTimeStr) {
+                  const nextParts = nextTimeStr.split(':');
+                  const nextMins = parseInt(nextParts[0]) * 60 + parseInt(nextParts[1]) + (jr._delay || 0);
+                  const span = nextMins - stopMins;
+                  fraction = span > 0 ? Math.min(1, (nowMins - stopMins) / span) : 0;
+                }
+              }
+            }
+          }
+          if (lastPassedStop >= 0) {
+            // Find the route coords for this stop and interpolate
+            const stopCoord = [jr._stops[lastPassedStop].lon, jr._stops[lastPassedStop].lat];
+            const pos = findOnPath(stopCoord[0], stopCoord[1], jr._rawCoords);
+            let endIdx = pos.segIdx;
+            let endT = pos.t;
+            // If between stops, interpolate further along the route
+            if (fraction > 0 && lastPassedStop < jr._stops.length - 1) {
+              const nextCoord = [jr._stops[lastPassedStop + 1].lon, jr._stops[lastPassedStop + 1].lat];
+              const nextPos = findOnPath(nextCoord[0], nextCoord[1], jr._rawCoords);
+              // Interpolate between the two positions on the route
+              const totalDist = nextPos.distAlong - pos.distAlong;
+              const targetDist = pos.distAlong + totalDist * fraction;
+              // Walk along to find the right segment
+              let cumDist = 0;
+              for (let i = 0; i < jr._rawCoords.length - 1; i++) {
+                const segLen = Math.sqrt(distSq(jr._rawCoords[i][0], jr._rawCoords[i][1], jr._rawCoords[i+1][0], jr._rawCoords[i+1][1]));
+                if (cumDist + segLen >= targetDist) {
+                  endIdx = i;
+                  endT = (targetDist - cumDist) / (segLen || 1);
+                  break;
+                }
+                cumDist += segLen;
+              }
+            }
+            traveled = jr._rawCoords.slice(0, endIdx + 1);
+            const a = jr._rawCoords[endIdx];
+            const b = jr._rawCoords[endIdx + 1];
+            if (a && b) {
+              traveled.push([a[0] + endT * (b[0] - a[0]), a[1] + endT * (b[1] - a[1])]);
+            }
+          }
+        }
+
+        if (traveled && traveled.length >= 2) {
+          map.getSource('journey-progress').setData({
+            type: 'FeatureCollection',
+            features: [{ type: 'Feature', properties: { color: jr._colour || '#4FC3F7' }, geometry: { type: 'LineString', coordinates: traveled } }],
+          });
+        }
       }
 
       setVehicleCount(visibleIds.size);
@@ -746,9 +998,12 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
     renderInViewportRef.current = renderInViewport;
 
     const fetchVehicles = async () => {
-      if (!mapRef.current) return;
+      if (!mapRef.current || pausedRef.current) return;
       try {
-        const res = await fetch('/api/vehicles');
+        // Viewport-filtered fetch: only get vehicles visible on the map
+        const bounds = mapRef.current.getBounds();
+        const bbox = `${bounds.getSouth().toFixed(3)},${bounds.getWest().toFixed(3)},${bounds.getNorth().toFixed(3)},${bounds.getEast().toFixed(3)}`;
+        const res = await fetch(`/api/vehicles?bbox=${bbox}`);
         if (!res.ok) return;
         const data = await res.json();
         if (!data.vehicles) return;
@@ -761,7 +1016,7 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
 
     mapRef.current?.on('moveend', renderInViewport);
     fetchVehicles();
-    const interval = setInterval(fetchVehicles, 2000);
+    const interval = setInterval(fetchVehicles, 5000); // 5s matches backend refresh rate
     return () => {
       clearInterval(interval);
       clearTimeout(interactTimeout);
@@ -773,16 +1028,33 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
     };
   }, []);
 
+  // When resuming from paused, fetch vehicles immediately
+  useEffect(() => {
+    if (!paused && renderInViewportRef.current && mapRef.current) {
+      // Fetch fresh data immediately on resume
+      (async () => {
+        try {
+          const res = await fetch('/api/vehicles');
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data.vehicles) return;
+          allVehiclesRef.current = data.vehicles;
+          renderInViewportRef.current();
+        } catch (e) { /* will retry on next interval tick */ }
+      })();
+    }
+  }, [paused]);
+
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
       {!userLocation && (
         <div style={{
           position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)',
-          background: 'rgba(15,17,23,0.85)', color: '#ccc',
+          background: 'var(--overlay-bg)', color: 'var(--text-secondary)',
           padding: '6px 14px', borderRadius: 20, fontSize: 12,
           pointerEvents: 'none', whiteSpace: 'nowrap',
-          border: '1px solid #333'
+          border: '1px solid var(--overlay-border)'
         }}>
           📍 Pan the map to explore stops
         </div>
@@ -790,9 +1062,9 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
       {vehicleCount > 0 && (
         <div style={{
           position: 'absolute', top: 10, left: 10,
-          background: 'rgba(15,17,23,0.85)', color: '#4CAF50',
+          background: 'var(--overlay-bg)', color: 'var(--green)',
           padding: '4px 10px', borderRadius: 12, fontSize: 11,
-          pointerEvents: 'none', border: '1px solid #1e2130'
+          pointerEvents: 'none', border: '1px solid var(--overlay-border)'
         }}>
           🚌 {vehicleCount} live vehicles
         </div>
