@@ -124,10 +124,11 @@ Browser → CloudFront → API Gateway HTTP → Lambda → S3 tile read
 
 | API | Purpose |
 |-----|---------|
-| `v0.ovapi.nl/tpc/{codes}` | Live departure data (KV6-derived) |
+| `v0.ovapi.nl/tpc/{codes}` | Live departure data for bus/tram/metro (KV6-derived) |
 | `gtfs.ovapi.nl/nl/vehiclePositions.pb` | Live vehicle GPS positions (GTFS-RT protobuf) |
 | `gtfs.ovapi.nl/govi/gtfs-kv7-YYYYMMDD.zip` | KV7 GTFS (timing stops, OVapi-compatible TPCs) |
 | `gtfs.ovapi.nl/openov-nl/gtfs-openov-nl.zip` | Full NL GTFS (complete stops + shapes) |
+| `gateway.apiportal.ns.nl` | NS API: train departures, disruptions, journey detail, stations, rail geometry, OV-fiets (key in .env) |
 | `europe.motis-project.de/api/v1/plan` | Journey planning |
 | `nominatim.openstreetmap.org` | Geocoding (fallback when no transit stop coordinates) |
 | OpenFreeMap | Map tiles (dark/light themes) |

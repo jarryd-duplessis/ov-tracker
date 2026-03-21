@@ -151,10 +151,11 @@ openov-nl stops within 15 m of a KV7 stop are deduplicated. The merged set gives
 
 | API | Purpose |
 |---|---|
-| `v0.ovapi.nl/tpc/{codes}` | Live departure data (GOVI license) |
+| `v0.ovapi.nl/tpc/{codes}` | Live departure data for bus/tram/metro (GOVI license) |
 | `gtfs.ovapi.nl/govi/gtfs-kv7-YYYYMMDD.zip` | KV7 stop data (bus/tram/metro TPC codes) |
 | `gtfs.ovapi.nl/openov-nl/gtfs-openov-nl.zip` | Full NL GTFS (train, ferry, all operators) |
 | `gtfs.ovapi.nl/nl/vehiclePositions.pb` | Live vehicle GPS (GTFS-RT protobuf) |
+| `gateway.apiportal.ns.nl` | NS train departures, disruptions, journey detail, station data |
 | `europe.motis-project.de/api/v1/plan` | Journey planning |
 | `nominatim.openstreetmap.org` | Geocoding for journey planner |
 | OpenFreeMap | Map tiles |
@@ -238,8 +239,19 @@ OV data is provided under the **GOVI license** via OVapi.
 - [x] Dark/light theme toggle with localStorage persistence
 - [x] Comprehensive design system (CSS tokens, shadows, radii, animations)
 - [x] Polished mobile-responsive UI
-- [ ] Re-enable WebSocket push (server-push departures via SQS → poll Lambda)
-- [ ] NS/ferry departure data (requires separate API integration)
+- [x] Re-enable WebSocket push (DynamoDB Streams → push Lambda, replaces broken SQS loop)
+- [x] Live countdown timer (recalculates every second, no more stale "4 min")
+- [x] 5-tier confidence visual styling (live/recent/estimated/scheduled/unknown)
+- [x] Route path pre-computation in tiles (eliminates most /api/trip calls)
+- [x] API Gateway rate limiting (20 req/s, 50 burst)
+- [x] Test suite + CI/CD pipeline (GitHub Actions)
+- [ ] NS train departures at stations (API key obtained, spec in `docs/NS_API_INTEGRATION.md`)
+- [ ] NS disruptions overlay on map
+- [ ] NS train journey detail (per-stop delays, crowd forecast, rolling stock)
+- [ ] Rail network geometry layer (Spoorkaart GeoJSON)
+- [ ] OV-fiets availability at stations
+- [ ] NDOV ZeroMQ integration (sub-second events, spec in `docs/NDOV_INTEGRATION.md`)
+- [ ] Server-side dead reckoning (spec in `docs/SERVER_DEAD_RECKONING.md`)
 - [ ] Push notifications when tracked bus is < 2 min away
 - [ ] Zoom-aware stop search radius
 - [ ] "Bus didn't come" report button
