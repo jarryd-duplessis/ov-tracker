@@ -1,5 +1,9 @@
 'use strict';
 
+// DEPRECATED: Legacy two-tier vehicle cache (memory + S3).
+// Replaced by geographic tile system in ingest_vehicles.js + http_vehicles.js.
+// Used only as fallback when tiles are unavailable.
+
 const fs = require('fs');
 const path = require('path');
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');

@@ -3,10 +3,25 @@ import { useState, useEffect, useMemo } from 'react';
 const TYPE_ICON = { BUS: '🚌', TRAM: '🚊', METRO: '🚇' };
 const TYPE_COLOUR = { BUS: '#4CAF50', TRAM: '#FF9800', METRO: '#2196F3' };
 
+// Live countdown: recalculate minutes from expectedTime every second
+function useLiveMinutes(expectedTime) {
+  const [minutes, setMinutes] = useState(() =>
+    Math.round((new Date(expectedTime).getTime() - Date.now()) / 60000)
+  );
+  useEffect(() => {
+    const calc = () => Math.round((new Date(expectedTime).getTime() - Date.now()) / 60000);
+    setMinutes(calc());
+    const id = setInterval(() => setMinutes(calc()), 1000);
+    return () => clearInterval(id);
+  }, [expectedTime]);
+  return minutes;
+}
+
 function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
-  const isNow = dep.minutesUntil <= 1;
-  const isSoon = dep.minutesUntil <= 5;
-  const departed = dep.minutesUntil < -1;
+  const minutesUntil = useLiveMinutes(dep.expectedTime);
+  const isNow = minutesUntil <= 1;
+  const isSoon = minutesUntil <= 5;
+  const departed = minutesUntil < -1;
   const colour = TYPE_COLOUR[dep.transportType] || '#888';
   const icon = TYPE_ICON[dep.transportType] || '🚌';
   const isLive = dep.confidence === 'live';
@@ -111,7 +126,7 @@ function DepartureRow({ dep, isTracked, isSaved, onTrack, onToggleSave }) {
               borderRadius: 'var(--radius-sm)',
             }),
           }}>
-            {departed ? '—' : isNow ? 'NU' : `${dep.minutesUntil}'`}
+            {departed ? '—' : isNow ? 'NU' : `${minutesUntil}'`}
           </div>
         </div>
 

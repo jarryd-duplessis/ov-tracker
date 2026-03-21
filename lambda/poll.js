@@ -1,5 +1,9 @@
 'use strict';
 
+// DEPRECATED: Self-scheduling SQS loop disabled after AWS recursive loop detection.
+// WebSocket push now uses DynamoDB Streams (see push.js).
+// This file is retained for reference only.
+
 // SQS-triggered poll Lambda — the heartbeat of the shared departure push system.
 //
 // Flow per invocation:

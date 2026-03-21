@@ -307,6 +307,88 @@ resource "aws_lambda_event_source_mapping" "poll_sqs" {
   enabled          = false
 }
 
+# ─── PUSH LAMBDA (DynamoDB Streams → WebSocket) ──────────────────────────────
+# Replaces the SQS self-scheduling poll loop.
+# Triggered by DynamoDB Streams on the departures-cache table.
+# Pushes departure updates to all WebSocket subscribers watching those stops.
+
+data "aws_iam_policy_document" "dynamodb_streams_read" {
+  statement {
+    actions = [
+      "dynamodb:GetRecords",
+      "dynamodb:GetShardIterator",
+      "dynamodb:DescribeStream",
+      "dynamodb:ListStreams",
+    ]
+    resources = [aws_dynamodb_table.departures_cache.stream_arn]
+  }
+}
+
+resource "aws_iam_role" "lambda_push" {
+  name               = "${var.app_name}-lambda-push"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "lambda_push_logs" {
+  role   = aws_iam_role.lambda_push.id
+  policy = data.aws_iam_policy_document.logs.json
+}
+
+resource "aws_iam_role_policy" "lambda_push_ddb" {
+  role   = aws_iam_role.lambda_push.id
+  policy = data.aws_iam_policy_document.dynamodb_rw.json
+}
+
+resource "aws_iam_role_policy" "lambda_push_streams" {
+  role   = aws_iam_role.lambda_push.id
+  policy = data.aws_iam_policy_document.dynamodb_streams_read.json
+}
+
+resource "aws_iam_role_policy" "lambda_push_apigw" {
+  role   = aws_iam_role.lambda_push.id
+  policy = data.aws_iam_policy_document.apigw_manage.json
+}
+
+resource "aws_lambda_function" "push" {
+  function_name                  = "${var.app_name}-push"
+  role                           = aws_iam_role.lambda_push.arn
+  handler                        = "push.handler"
+  runtime                        = "nodejs20.x"
+  filename                       = data.archive_file.lambda.output_path
+  source_code_hash               = data.archive_file.lambda.output_base64sha256
+  timeout                        = 30
+  memory_size                    = 256
+  reserved_concurrent_executions = 20
+
+  environment {
+    variables = {
+      CONNECTIONS_TABLE      = aws_dynamodb_table.connections.name
+      WS_MANAGEMENT_ENDPOINT = "https://${aws_apigatewayv2_api.ws.id}.execute-api.${data.aws_region.current.name}.amazonaws.com/${aws_apigatewayv2_stage.ws.name}"
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "push" {
+  name              = "/aws/lambda/${aws_lambda_function.push.function_name}"
+  retention_in_days = 30
+}
+
+# DynamoDB Streams → push Lambda event source mapping
+resource "aws_lambda_event_source_mapping" "push_departures_stream" {
+  event_source_arn  = aws_dynamodb_table.departures_cache.stream_arn
+  function_name     = aws_lambda_function.push.arn
+  starting_position = "LATEST"
+  batch_size        = 10
+  enabled           = true
+
+  # Only trigger on INSERT/MODIFY, skip TTL-triggered REMOVE events
+  filter_criteria {
+    filter {
+      pattern = jsonencode({ eventName = ["INSERT", "MODIFY"] })
+    }
+  }
+}
+
 # ─── HTTP STOPS LAMBDA ────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "lambda_http_stops" {

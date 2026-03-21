@@ -46,6 +46,8 @@ function parseVehicleId(id) {
 }
 
 // Fetch route path (stop coordinates) for a vehicle — returns [[lon,lat], ...] or null
+// First checks if shape data is pre-computed in the tile (from ingest_vehicles),
+// which eliminates the /api/trip API call for most vehicles.
 async function getRoutePath(vehicle) {
   const parsed = parseVehicleId(vehicle.id);
   if (!parsed) return null;
@@ -54,6 +56,13 @@ async function getRoutePath(vehicle) {
   if (cached && Date.now() - cached.fetchedAt < ROUTE_PATH_TTL) return cached.coords;
   if (cached === null) return null; // already tried and failed
 
+  // Use pre-computed shape from tile data if available (avoids /api/trip call)
+  if (vehicle.shape && vehicle.shape.length >= 2) {
+    routePathCache[key] = { coords: vehicle.shape, fetchedAt: Date.now() };
+    return vehicle.shape;
+  }
+
+  // Fallback: fetch from /api/trip (for vehicles without pre-computed shapes)
   try {
     const params = new URLSearchParams({ vehicleId: vehicle.id });
     if (vehicle.line) params.set('line', vehicle.line);
@@ -751,11 +760,27 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
       rafId = requestAnimationFrame(tick);
     }
 
+    // Confidence tier visual styling
+    // live: solid, full opacity — fresh GPS
+    // recent: solid, slightly faded — GPS < 1 min old
+    // estimated: dashed border, faded — interpolating between known positions
+    // scheduled: outline only, very faded — timetable position, no GPS
+    function confidenceStyle(confidence) {
+      switch (confidence) {
+        case 'live': return { opacity: '1', border: 'solid', dash: false };
+        case 'recent': return { opacity: '0.85', border: 'solid', dash: false };
+        case 'estimated': return { opacity: '0.6', border: 'dashed', dash: true };
+        case 'scheduled': return { opacity: '0.35', border: 'dotted', dash: true };
+        default: return { opacity: '0.5', border: 'solid', dash: false };
+      }
+    }
+
     function applyStyle(el, v, isTracked, isFollowed) {
       const rot = v.bearing ? `transform:rotate(${v.bearing}deg);` : '';
+      const conf = confidenceStyle(v.confidence);
       if (isTracked || isFollowed) {
         el.innerHTML = `
-          <div style="position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;">
+          <div style="position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;opacity:${conf.opacity}">
             <div style="
               position:absolute;width:32px;height:32px;border-radius:50%;
               border:2px solid ${isFollowed ? '#FFD740' : '#4FC3F7'};
@@ -770,12 +795,12 @@ mapRef.current.flyTo({ center: [centerOn.lon, centerOn.lat], zoom: 15, speed: 1.
           </div>`;
       } else {
         el.innerHTML = `<div style="
-          background:${v.color};
-          border:2px solid var(--vehicle-border);
+          background:${conf.dash ? 'transparent' : v.color};
+          border:2px ${conf.border} ${conf.dash ? v.color : 'var(--vehicle-border)'};
           border-radius:50%;width:18px;height:18px;
           display:flex;align-items:center;justify-content:center;
-          font-size:9px;font-weight:800;color:white;
-          box-shadow:0 1px 4px rgba(0,0,0,0.5);${rot}
+          font-size:9px;font-weight:800;color:${conf.dash ? v.color : 'white'};
+          box-shadow:0 1px 4px rgba(0,0,0,0.5);opacity:${conf.opacity};${rot}
         ">${v.bearing ? '▲' : '•'}</div>`;
       }
     }

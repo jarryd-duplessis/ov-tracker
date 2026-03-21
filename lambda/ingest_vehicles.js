@@ -49,6 +49,92 @@ function loadRoutes() {
   return routesCache;
 }
 
+// ── Trip shape cache (for route path pre-computation) ─────────────────────
+// Cache up to 50 trip files in memory per Lambda invocation.
+// Key: "operator_route", Value: parsed JSON data
+
+const tripShapeCache = {};
+const TRIP_SHAPE_CACHE_MAX = 50;
+const tripShapeCacheKeys = []; // LRU tracking
+
+async function getTripShape(operator, route) {
+  const cacheKey = `${operator}_${route}`;
+  const cached = tripShapeCache[cacheKey];
+  if (cached !== undefined) return cached; // null means tried and failed
+
+  try {
+    const obj = await s3.send(new GetObjectCommand({
+      Bucket: BUCKET,
+      Key: `trips/${cacheKey}.json`,
+    }));
+    const data = JSON.parse(await obj.Body.transformToString());
+    // Evict oldest entry if cache is full
+    if (tripShapeCacheKeys.length >= TRIP_SHAPE_CACHE_MAX) {
+      const evictKey = tripShapeCacheKeys.shift();
+      delete tripShapeCache[evictKey];
+    }
+    tripShapeCache[cacheKey] = data;
+    tripShapeCacheKeys.push(cacheKey);
+    return data;
+  } catch {
+    tripShapeCache[cacheKey] = null;
+    return null;
+  }
+}
+
+// Extract shape coordinates for a specific journey from trip data.
+// Returns [[lon,lat], ...] capped at 200 points, or null.
+function extractShapeForJourney(tripData, journeyNum) {
+  if (!tripData) return null;
+
+  // Find the journey (exact match or closest)
+  let journey = tripData[journeyNum];
+  if (!journey) {
+    const target = parseInt(journeyNum);
+    if (isNaN(target)) return null;
+    let bestKey = null, bestDist = Infinity;
+    for (const key of Object.keys(tripData)) {
+      if (key === '_shapes') continue;
+      const dist = Math.abs(parseInt(key) - target);
+      if (dist < bestDist) { bestDist = dist; bestKey = key; }
+    }
+    if (bestKey && bestDist <= 5) journey = tripData[bestKey];
+    else if (bestKey) journey = tripData[bestKey];
+  }
+  if (!journey) return null;
+
+  // Resolve shape from _shapes if present
+  let coords = null;
+  if (journey.shapeRef && tripData._shapes && tripData._shapes[journey.shapeRef]) {
+    coords = tripData._shapes[journey.shapeRef];
+  } else if (journey.shape && journey.shape.length >= 2) {
+    coords = journey.shape;
+  }
+
+  if (!coords || coords.length < 2) {
+    // Fall back to stop coordinates
+    if (journey.stops && journey.stops.length >= 2) {
+      const sorted = [...journey.stops].sort((a, b) => a.seq - b.seq);
+      coords = sorted.map(s => [s.lon, s.lat]);
+    }
+  }
+
+  if (!coords || coords.length < 2) return null;
+
+  // Cap at 200 coordinate pairs
+  if (coords.length > 200) {
+    // Downsample evenly
+    const step = (coords.length - 1) / 199;
+    const sampled = [];
+    for (let i = 0; i < 200; i++) {
+      sampled.push(coords[Math.round(i * step)]);
+    }
+    coords = sampled;
+  }
+
+  return coords;
+}
+
 // ── Previous positions for bearing/speed computation ──────────────────────
 
 let prevPositions = {}; // id → { lat, lon, t }
@@ -208,6 +294,7 @@ async function processCycle() {
       routeId, tripId: vp.trip?.tripId || '',
       line: route.shortName, category: route.category, color: route.color,
       confidence,
+      shape: null, // populated below from trip data
     };
 
     // Bucket into tile
@@ -220,6 +307,42 @@ async function processCycle() {
       t: now, id: entity.id, lat, lon, bearing, speed,
       line: route.shortName, cat: route.category, conf: confidence,
     });
+  }
+
+  // ── Attach route shapes to vehicles ─────────────────────────────────────
+  // Parse vehicle IDs to extract operator/route/journeyNum, then batch-fetch
+  // trip data from S3 (cached in memory) and attach shape coordinates.
+  // This lets the frontend dead-reckon along route shapes without calling /api/trip.
+  const shapeFetchPromises = new Map(); // "operator_route" → Promise<data>
+  const vehicleShapeNeeds = []; // { vehicle, operator, route, journeyNum }
+
+  for (const tileVehicles of Object.values(tiles)) {
+    for (const vehicle of tileVehicles) {
+      // Vehicle ID format: "2026-03-17:OPERATOR:ROUTE:JOURNEYNUM"
+      const parts = vehicle.id.split(':');
+      if (parts.length < 4) continue;
+      const [, operator, route, journeyNum] = parts;
+      if (!operator || !route || !journeyNum) continue;
+
+      vehicleShapeNeeds.push({ vehicle, operator, route, journeyNum });
+
+      const fetchKey = `${operator}_${route}`;
+      if (!shapeFetchPromises.has(fetchKey)) {
+        shapeFetchPromises.set(fetchKey, getTripShape(operator, route));
+      }
+    }
+  }
+
+  // Wait for all unique trip file fetches (most will be cache hits)
+  const fetchEntries = [...shapeFetchPromises.entries()];
+  const fetchResults = await Promise.all(fetchEntries.map(([, p]) => p.catch(() => null)));
+  const tripDataMap = {};
+  fetchEntries.forEach(([key], i) => { tripDataMap[key] = fetchResults[i]; });
+
+  // Attach shapes to vehicles
+  for (const { vehicle, operator, route, journeyNum } of vehicleShapeNeeds) {
+    const tripData = tripDataMap[`${operator}_${route}`];
+    vehicle.shape = extractShapeForJourney(tripData, journeyNum);
   }
 
   // Save prev positions for next cycle/invocation
